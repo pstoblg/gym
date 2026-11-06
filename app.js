@@ -58,14 +58,17 @@ function defaultMuscle(name){ for(const t of Object.values(DEFAULT_TEMPLATES)){ 
    Everything lives in this device's localStorage (and in iCloud Drive via the backup Shortcut). Nothing is sent anywhere else. */
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function num(v){ const n=parseFloat(String(v??'').replace(',','.')); return isFinite(n)? n : 0; }
+function localToday(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function defaultState(){
   return {
     v:3,
     profile:{ name:'', onboarded:false, obStep:0 },
-    settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, defaultRest:120, sound:true, nextOverride:null, theme:'auto',
+    settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(),
+      defaultRest:120, sound:true, nextOverride:null, theme:'auto',
       step:0.25, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
       backupToken:null, backupVerified:0 },
     templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)),
+    planPins: {},
     sessions: [], bodyweight: [], active: null, healthPending: null, lastChange: 0,
   };
 }
@@ -81,7 +84,7 @@ function migrate(s){
   if(s.settings.icloudShortcut==='PPL Save') s.settings.icloudShortcut='Gym Save';
   if(s.settings.healthShortcut==='PPL Health') s.settings.healthShortcut='Gym Health';
   s.profile = Object.assign({}, d.profile, s.profile||{});
-  s.sessions = s.sessions||[]; s.bodyweight = s.bodyweight||[];
+  s.sessions = s.sessions||[]; s.bodyweight = s.bodyweight||[]; s.planPins = s.planPins||{};
   s.templates = s.templates||{};
   for(const k of Object.keys(DEFAULT_TEMPLATES)){
     let t = s.templates[k];
@@ -209,21 +212,63 @@ function deltaHtml(d, unit){
   return d>0? `<span class="up">▲ +${fw(d)} ${unit}</span>` : `<span class="down">▼ ${fw(d)} ${unit}</span>`;
 }
 
-/* ================= planning (rotation, boulder, skips) ================= */
-function nextPlan(){
-  const rot = S.settings.rotation;
-  let type;
-  if (S.settings.nextOverride) type = S.settings.nextOverride;
+/* ================= planning =================
+   The split (settings.rotation, e.g. Push → Legs → Pull) repeats forever and is laid onto the training days
+   (every weekday except settings.restDays). Days fixed by hand (S.planPins[date] = key or 'rest') stay as they are.
+   All other days are recalculated from what was actually done, so a skip or a different workout shifts the plan. */
+const PLAN_KEYS = ['Push','Legs','Pull','PullBoulder'];
+const SPLIT_PRESETS = [
+  {label:'Push → Legs → Pull', order:['Push','Legs','Pull']},
+  {label:'Push → Pull → Legs', order:['Push','Pull','Legs']},
+];
+const keyLabel = k => k==='PullBoulder'? 'Pull + Boulder' : k==='rest'? 'Rest' : k;
+const keyShort = k => k==='PullBoulder'? 'Bldr' : k==='rest'? '–' : k;
+const keyType = k => k==='PullBoulder'? 'Pull' : k;
+const daysBetween = (a,b) => Math.round((parseISO(b)-parseISO(a))/86400000);
+function rotationState(){
+  const rot = S.settings.rotation && S.settings.rotation.length? S.settings.rotation : TYPES;
+  let idx = 0;
+  if (S.settings.nextOverride && rot.includes(S.settings.nextOverride)) idx = rot.indexOf(S.settings.nextOverride);
   else {
     const pool = sortSessions(S.sessions.filter(s=> s.status==='done' || (S.settings.skipAdvances && s.status==='skip')));
     const last = pool[pool.length-1];
-    type = last ? rot[(rot.indexOf(last.type)+1) % rot.length] : rot[0];
+    if (last) idx = (rot.indexOf(last.type)+1) % rot.length;
   }
-  let boulder=false;
-  if (type==='Pull'){ const pulls = doneSessions().filter(s=>s.type==='Pull'); const lp = pulls[pulls.length-1]; boulder = lp ? !lp.boulder : false; }
-  return {type, boulder, key: boulder?'PullBoulder':type};
+  const pulls = doneSessions().filter(s=>s.type==='Pull'); const lp = pulls[pulls.length-1];
+  return {rot, idx, lastBoulder: lp? !!lp.boulder : true};
 }
+function takeNext(st){ const type = st.rot[st.idx % st.rot.length]; return (type==='Pull' && S.settings.boulderEvery2nd && !st.lastBoulder)? 'PullBoulder' : type; }
+function consume(st, key){
+  const t=keyType(key), len=st.rot.length;
+  if(st.rot[st.idx%len]===t) st.idx=(st.idx+1)%len;           // the expected one (also works if a workout appears twice in the split)
+  else { const i=st.rot.indexOf(t); if(i>=0) st.idx=(i+1)%len; } // something else was done → continue after it
+  if(t==='Pull') st.lastBoulder = key==='PullBoulder';
+}
+// Plan from today for n days: [{date, key ('Push'|'Legs'|'Pull'|'PullBoulder'|'rest'|null when already logged), pinned, logged}]
+function planDays(n){
+  const st = rotationState(), today = iso(), out = [];
+  for(let i=0;i<n;i++){
+    const d = addDays(today,i), logged = S.sessions.filter(s=>s.date===d), pin = S.planPins[d];
+    if(logged.length){ out.push({date:d, key:null, pinned:!!pin, logged}); continue; }
+    const key = pin || (isRestDay(d)? 'rest' : takeNext(st));
+    if(key!=='rest') consume(st, key);
+    out.push({date:d, key, pinned:!!pin, logged});
+  }
+  return out;
+}
+function planFor(d){ const n=daysBetween(iso(),d); return n<0? null : planDays(n+1)[n]; }
+function autoKeyFor(d){ const p=S.planPins[d]; delete S.planPins[d]; const r=planFor(d); if(p) S.planPins[d]=p; return r? r.key : null; }
+function nextPlan(){ const k = takeNext(rotationState()); return {type:keyType(k), boulder:k==='PullBoulder', key:k}; }
+function todayPlan(){ return planDays(1)[0]; }
+function nextTraining(){ return planDays(21).slice(1).find(p=>p.key && p.key!=='rest'); }
 function isRestDay(dateISO){ return S.settings.restDays.includes(parseISO(dateISO).getDay()); }
+// Past planned training days without any entry: the plan must not silently hide skips.
+function unaccountedDays(){
+  const out=[], today=iso(), start=S.settings.planStart||today;
+  for(let i=14;i>=1;i--){ const d=addDays(today,-i); if(d<start || S.sessions.some(s=>s.date===d)) continue;
+    const pin=S.planPins[d]; if(pin==='rest' || (!pin && isRestDay(d))) continue; out.push(d); }
+  return out;
+}
 function skipStats(){
   const all = S.sessions.filter(s=>s.status==='skip');
   const mon = mondayOf(iso());
@@ -275,11 +320,12 @@ function viewOnboarding(){
   else if(step===1) body = `<h1>What's your name?</h1><p class="ink2 small">Only used to greet you. Stored on this device only.</p>
     <input id="obName" data-prof="name" value="${esc(p.name)}" placeholder="Your name" autocomplete="given-name">
     ${nav('Next')}`;
-  else if(step===2) body = `<h1>Your training</h1>
+  else if(step===2) body = `<h1>Your training plan</h1>
+    <p class="small ink2">Your split repeats on your training days: <b>${st.rotation.map(esc).join(' → ')} → …</b>${st.boulderEvery2nd?' (every 2nd Pull day with bouldering)':''}. You can change the order and fix single days later.</p>
     <label class="f">Which workout is next for you?</label>
-    <div class="chips">${TYPES.map(t=>`<button class="chip ${(st.nextOverride||'Push')===t?'on':''}" data-act="override" data-v="${t}">${t}</button>`).join('')}</div>
-    <label class="f">Rest days</label>
-    <div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${st.restDays.includes(d)?'on':''}" data-act="restDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>
+    <div class="chips">${st.rotation.filter((t,i,a)=>a.indexOf(t)===i).map(t=>`<button class="chip ${(st.nextOverride||st.rotation[0])===t?'on':''}" data-act="override" data-v="${t}">${t}</button>`).join('')}</div>
+    <label class="f">Training days</label>
+    <div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${!st.restDays.includes(d)?'on':''}" data-act="restDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>
     <label class="f">Bodyweight today (kg, optional)</label><input id="obBW" inputmode="decimal" value="${latestBW()?fw(latestBW()):''}" placeholder="e.g. 78.5">
     <p class="small muted">You can change all of this, plus exercises and warm-ups, later in Settings.</p>
     ${nav('Next')}`;
@@ -305,26 +351,46 @@ function viewOnboarding(){
 function obNext(){
   const p=S.profile;
   if(p.obStep===1){ const n=($('#obName')?.value||'').trim(); if(!n){ toast('Enter your name'); return; } p.name=n; }
-  if(p.obStep===2){ const k=num($('#obBW')?.value); if(k) upsertBW(iso(),k); if(!S.settings.nextOverride && !S.sessions.length) S.settings.nextOverride='Push'; }
+  if(p.obStep===2){ const k=num($('#obBW')?.value); if(k) upsertBW(iso(),k); if(!S.settings.nextOverride && !S.sessions.length) S.settings.nextOverride=S.settings.rotation[0]; }
+  if(p.obStep>=OB_STEPS-1) S.settings.planStart = iso();
   if(p.obStep>=OB_STEPS-1){ p.onboarded=true; p.obStep=0; save(); go('today'); return; }
   p.obStep++; save(); window.scrollTo(0,0); render();
 }
 
 /* ================= TODAY ================= */
 function dayMarks(list){ return list.map(s=> s.status==='done'?`<span class="t-${s.type}">●</span>`:'<span style="color:var(--bad)">✕</span>').join(''); }
+// Marker for one day: logged entries, the planned workout (future), or a "?" for a past training day without entry
+function dayCell(d, planMap, missing){
+  const list=S.sessions.filter(s=>s.date===d);
+  if(list.length) return dayMarks(list);
+  const p=planMap[d];
+  if(p && p.key) return p.key==='rest'? `<span class="muted">${p.pinned?'📌':''}–</span>` : `<span class="plan t-${keyType(p.key)}">${p.pinned?'📌':''}${keyShort(p.key)}</span>`;
+  if(missing.includes(d)) return '<span style="color:var(--warn);font-weight:700">?</span>';
+  return isRestDay(d)?'<span class="muted">–</span>':'<span class="muted">·</span>';
+}
+function planMapUntil(lastDate){ const n=daysBetween(iso(), lastDate); const m={}; if(n>=0) planDays(n+1).forEach(p=>m[p.date]=p); return m; }
 function greeting(){ const h=new Date().getHours(); return h<11?'Good morning':h<17?'Hi':'Good evening'; }
 function viewToday(){
-  const today = iso(), mon = mondayOf(today), plan = nextPlan(), ss = skipStats(), rest = isRestDay(today);
+  const today = iso(), mon = mondayOf(today), ss = skipStats();
+  const tp = todayPlan(), plan = tp.key && tp.key!=='rest'? {type:keyType(tp.key), boulder:tp.key==='PullBoulder', key:tp.key} : nextPlan();
+  const rest = tp.key==='rest', nt = rest? nextTraining() : null;
+  const missing = unaccountedDays(), planMap = planMapUntil(addDays(today,14));
   let days='';
   for(let i=0;i<7;i++){
-    const d=addDays(mon,i), list=S.sessions.filter(s=>s.date===d), dd=parseISO(d);
-    const st = list.length? dayMarks(list) : isRestDay(d)?'<span class="muted">–</span>':'<span class="muted">·</span>';
-    days += `<div class="day ${d===today?'today':''}" data-act="day" data-v="${d}"><div class="muted">${DOW[dd.getDay()]}</div><b>${dd.getDate()}</b><div class="st">${st}</div></div>`;
+    const d=addDays(mon,i), dd=parseISO(d);
+    days += `<div class="day ${d===today?'today':''}" data-act="day" data-v="${d}"><div class="muted">${DOW[dd.getDay()]}</div><b>${dd.getDate()}</b><div class="st">${dayCell(d,planMap,missing)}</div></div>`;
   }
+  const upcoming = Object.values(planMap).filter(p=>p.date>today && p.key && (p.key!=='rest' || p.pinned)).slice(0,10)
+    .map(p=>`<div class="list-item" data-act="day" data-v="${p.date}"><span class="dot" style="background:${p.key==='rest'?'var(--muted)':`var(--${keyType(p.key).toLowerCase()})`}"></span>
+      <div style="flex:1"><b>${esc(keyLabel(p.key))}</b> <span class="small muted">${fmtDate(p.date)}</span></div>${p.pinned?'<span class="pill">📌 fixed</span>':''}<span class="muted">›</span></div>`).join('');
   const ago = S.settings.icloudLast? Math.floor((Date.now()-S.settings.icloudLast)/86400000) : null;
   let banner = '';
-  if(!S.active && !S.settings.backupVerified) banner = `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>iCloud backup not verified</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Check</button></div>`;
-  else if(!S.active && icloudDirty()) banner = `<div class="card row between" style="border-color:var(--warn)">
+  if(missing.length && !S.active) banner += `<div class="card" style="border-color:var(--warn)"><b>Planned training without an entry</b>
+    <p class="small ink2" style="margin:4px 0 6px">Skips are never hidden. What happened?</p>
+    ${missing.map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>
+      <span class="row"><button class="small no" data-act="missSkip" data-v="${d}">Skipped</button><button class="small" data-act="manualOpen" data-v="${d}">Trained</button><button class="small ghost" data-act="missRest" data-v="${d}">Rest day</button></span></div>`).join('')}</div>`;
+  if(!S.active && !S.settings.backupVerified) banner += `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>iCloud backup not verified</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Check</button></div>`;
+  else if(!S.active && icloudDirty()) banner += `<div class="card row between" style="border-color:var(--warn)">
     <div class="small"><b>Not saved to iCloud</b><br><span class="muted">${ago==null?'Never synced yet':'Last sync '+(ago===0?'today':ago+' day(s) ago')}</span></div>
     <button class="primary" data-act="icloudSave">Save</button></div>`;
   let main;
@@ -333,10 +399,10 @@ function viewToday(){
   } else {
     const doneToday = S.sessions.find(s=>s.date===today && s.status==='done');
     main = `<div class="card">
-      <div class="row between"><span class="muted small">${rest?'Rest day by plan':'Next in rotation'}</span>${S.settings.nextOverride?'<span class="pill">set manually</span>':''}</div>
-      <div class="hero t-${plan.type}">${esc(plan.type)}${plan.boulder?' + Boulder':''}</div>
-      ${plan.type==='Pull'?`<p class="small ink2" style="margin:4px 0 0">${plan.boulder?'Every 2nd Pull day: bouldering first, then pull-ups, rows, biceps and shrugs.':'Regular gym Pull day. The next Pull day is a bouldering day.'}</p>`:''}
-      ${rest?'<p class="small ink2">Today is a rest day. Recovery comes before the calendar. You can still train if you want to.</p>':''}
+      <div class="row between"><span class="muted small">${doneToday?'Next in rotation':rest?'Today: rest day':'Today’s plan'}</span>${tp.pinned?'<span class="pill">📌 fixed</span>':''}</div>
+      ${rest && !doneToday? `<div class="hero">Rest</div><p class="small ink2" style="margin:4px 0 0">Recovery comes before the calendar.${nt?` Next: <b>${esc(keyLabel(nt.key))}</b> on ${fmtDate(nt.date)}.`:''} You can still train today if you want to.</p>`
+      : `<div class="hero t-${plan.type}">${esc(plan.type)}${plan.boulder?' + Boulder':''}</div>
+      ${plan.type==='Pull' && S.settings.boulderEvery2nd?`<p class="small ink2" style="margin:4px 0 0">${plan.boulder?'Every 2nd Pull day: bouldering first, then pull-ups, rows, biceps and shrugs.':'Regular gym Pull day. The next Pull day is a bouldering day.'}</p>`:''}`}
       ${doneToday?`<p class="small" style="color:var(--good)">✓ Already trained today (${esc(doneToday.type)}).</p>`:''}
       <div class="grid2" style="margin-top:12px">
         <button class="primary big" data-act="startOpen">Start workout</button>
@@ -346,9 +412,12 @@ function viewToday(){
   }
   return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}
   <div class="card">
-    <div class="row between"><h2 style="margin:0">This week</h2><span class="small muted">tap a day for details</span></div>
+    <div class="row between"><h2 style="margin:0">This week</h2><span class="small muted">tap a day to see or plan it</span></div>
     <div class="week">${days}</div>
   </div>
+  <div class="card"><div class="row between"><h2 style="margin:0">Next 2 weeks</h2><button class="link" data-act="tab" data-v="settings">Edit plan</button></div>
+    ${upcoming || '<div class="empty small">No training days planned. Set your training days in Settings.</div>'}
+    <p class="small muted" style="margin:6px 0 0">Tap a day to fix a workout or a rest day. Fixed days (📌) stay put; all others shift when you skip or train something else.</p></div>
   <div class="grid3">
     <div class="stat"><div class="v" style="color:${ss.week?'var(--bad)':'inherit'}">${ss.week}</div><div class="l">Skips this week</div></div>
     <div class="stat"><div class="v">${ss.total}</div><div class="l">Official skip count</div></div>
@@ -531,10 +600,12 @@ function agoSheet(kind){
   <button class="big" style="margin-top:14px" data-act="closeModal">Cancel</button>`;
 }
 function startSheet(){
-  const plan=nextPlan();
+  const tp=todayPlan(), planned = tp.key && tp.key!=='rest';
+  const plan = planned? {key:tp.key} : nextPlan();
   return `<h2>Start workout?</h2>
   <label class="f">What are you training today?</label>
-  <select id="stKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${w.key===plan.key?'selected':''}>${w.label}${w.key===plan.key?' (next in rotation)':''}</option>`).join('')}</select>
+  <select id="stKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${w.key===plan.key?'selected':''}>${w.label}${w.key===plan.key?(planned?' (planned today)':' (next in rotation)'):''}</option>`).join('')}</select>
+  <p class="small muted" style="margin:4px 0 0">Doing something else than planned is fine: the plan for the coming days adjusts.</p>
   <label class="f">Started</label>
   <select id="stAgo"><option value="0">Now</option>${[5,10,15,20,30,45,60].map(m=>`<option value="${m}">${m} min ago</option>`).join('')}</select>
   <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="primary big" data-act="startGo">Yes, start</button></div>`;
@@ -580,8 +651,10 @@ function viewHistory(){
   const first = new Date(y,m-1,1), startPad=(first.getDay()+6)%7, daysIn=new Date(y,m,0).getDate(), today=iso();
   let cells = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
   for(let i=0;i<startPad;i++) cells+='<div class="c out"></div>';
-  for(let d=1; d<=daysIn; d++){ const ds=`${y}-${pad(m)}-${pad(d)}`, list=S.sessions.filter(s=>s.date===ds);
-    cells += `<div class="c ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${d}</div><div class="st">${dayMarks(list)}</div></div>`; }
+  const lastDay = `${y}-${pad(m)}-${pad(daysIn)}`, planMap = planMapUntil(lastDay), missing = unaccountedDays();
+  for(let d=1; d<=daysIn; d++){ const ds=`${y}-${pad(m)}-${pad(d)}`;
+    const cell = (ds<today && !S.sessions.some(s=>s.date===ds) && !missing.includes(ds))? '' : dayCell(ds, planMap, missing);
+    cells += `<div class="c ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${d}</div><div class="st">${cell}</div></div>`; }
   let list = sortSessions(S.sessions).reverse();
   if(histFilter!=='all') list = list.filter(s=> histFilter==='skip'? s.status==='skip' : s.type===histFilter && s.status==='done');
   const seg = ['all','Push','Legs','Pull','skip'].map(k=>`<button class="${histFilter===k?'on':''}" data-act="histF" data-v="${k}">${k==='all'?'All':k==='skip'?'Skips':k}</button>`).join('');
@@ -633,9 +706,20 @@ function sessionDetail(s){
 }
 let dayOpen=null;
 function daySheet(date){
-  const list = sortSessions(S.sessions.filter(s=>s.date===date));
+  const list = sortSessions(S.sessions.filter(s=>s.date===date)), today=iso();
+  let planHtml = '';
+  if(date>=today && !list.length){
+    const pin = S.planPins[date], auto = autoKeyFor(date);
+    const opts = [['', `Auto${auto?' ('+keyLabel(auto)+')':''}`], ...PLAN_KEYS.map(k=>[k,keyLabel(k)]), ['rest','Rest']];
+    planHtml = `<div class="card"><h3>Plan for this day</h3>
+      <div class="chips">${opts.map(([k,l])=>`<button class="chip ${(pin||'')===k?'on':''}" data-act="pin" data-d="${date}" data-v="${k}">${k?'📌 ':''}${esc(l)}</button>`).join('')}</div>
+      <p class="small muted" style="margin:8px 0 0">${pin? 'Fixed: this day keeps this plan, whatever happens before it.' : 'Auto follows your split and shifts when you skip or train something else.'}</p></div>`;
+  } else if(date<today && !list.length && unaccountedDays().includes(date)){
+    planHtml = `<div class="card" style="border-color:var(--warn)"><h3>Planned training, nothing logged</h3><div class="grid3">
+      <button class="no" data-act="missSkip" data-v="${date}">Skipped</button><button data-act="manualOpen" data-v="${date}">Trained</button><button class="ghost" data-act="missRest" data-v="${date}">Rest day</button></div></div>`;
+  }
   return `<div class="row between"><h2 style="margin:0">${fmtDate(date)} ${date.slice(0,4)}</h2><button class="icon" data-act="closeModal">✕</button></div>
-  <div style="margin-top:12px">${list.map(sessionDetail).join('') || `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`}</div>
+  <div style="margin-top:12px">${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
   ${healthPasteBtn()}
   <button class="ghost big" data-act="manualOpen" data-v="${date}">+ Add entry for this day</button>`;
 }
@@ -827,13 +911,27 @@ function viewSettings(){
   <div class="card"><h2>Profile</h2>
     <label class="f">Name (stored on this device only)</label><input data-prof="name" value="${esc(S.profile.name)}">
     <button class="link" data-act="obRestart">Run the welcome wizard again</button></div>
-  <div class="card"><h2>Rotation & rules</h2>
-    <label class="f">Next workout (manual override)</label>
-    <div class="chips"><button class="chip ${!st.nextOverride?'on':''}" data-act="override" data-v="">Automatic</button>${TYPES.map(t=>`<button class="chip ${st.nextOverride===t?'on':''}" data-act="override" data-v="${t}">${t}</button>`).join('')}</div>
-    <label class="f">Rest days</label>
-    <div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${st.restDays.includes(d)?'on':''}" data-act="restDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>
+  <div class="card"><h2>Training plan</h2>
+    <label class="f">Split (repeats on your training days)</label>
+    <div class="chips">${SPLIT_PRESETS.map(p=>`<button class="chip ${p.order.join()===st.rotation.join()?'on':''}" data-act="splitPreset" data-v="${p.order.join(',')}">${esc(p.label)}</button>`).join('')}
+      <span class="chip ${SPLIT_PRESETS.some(p=>p.order.join()===st.rotation.join())?'':'on'}" style="opacity:.8">Custom</span></div>
+    <div style="margin-top:8px">${st.rotation.map((t,i)=>`<div class="row" style="margin-top:6px"><span class="small muted" style="width:18px">${i+1}.</span>
+      <select data-rot="${i}">${TYPES.map(x=>`<option ${x===t?'selected':''}>${x}</option>`).join('')}</select>
+      <button class="icon" data-act="rotUp" data-i="${i}">↑</button>${st.rotation.length>1?`<button class="icon" data-act="rotDel" data-i="${i}" style="color:var(--bad)">✕</button>`:''}</div>`).join('')}
+      <button class="small ghost" style="margin-top:8px" data-act="rotAdd">+ Add day to split</button></div>
+    <p class="small ink2">${st.rotation.map(esc).join(' → ')} → ${esc(st.rotation[0])} → …</p>
+    <label class="f">Training days</label>
+    <div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${!st.restDays.includes(d)?'on':''}" data-act="restDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>
+    <label class="f">Every 2nd Pull day with bouldering</label>
+    <div class="chips"><button class="chip ${st.boulderEvery2nd?'on':''}" data-act="boulder2" data-v="1">On</button><button class="chip ${!st.boulderEvery2nd?'on':''}" data-act="boulder2" data-v="0">Off</button></div>
     <label class="f">When a workout is skipped</label>
-    <div class="chips"><button class="chip ${!st.skipAdvances?'on':''}" data-act="skipAdv" data-v="0">Same workout comes next</button><button class="chip ${st.skipAdvances?'on':''}" data-act="skipAdv" data-v="1">Rotation moves on</button></div>
+    <div class="chips"><button class="chip ${!st.skipAdvances?'on':''}" data-act="skipAdv" data-v="0">It moves to the next training day (default)</button><button class="chip ${st.skipAdvances?'on':''}" data-act="skipAdv" data-v="1">It's dropped, rotation moves on</button></div>
+    <label class="f">Next workout in the rotation</label>
+    <div class="chips"><button class="chip ${!st.nextOverride?'on':''}" data-act="override" data-v="">Automatic</button>${TYPES.filter(t=>st.rotation.includes(t)).map(t=>`<button class="chip ${st.nextOverride===t?'on':''}" data-act="override" data-v="${t}">${t}</button>`).join('')}</div>
+    <p class="small muted">Fixed days: ${Object.keys(S.planPins).filter(d=>d>=iso()).length}. Fix single days by tapping them in the week view or calendar.
+      ${Object.keys(S.planPins).some(d=>d>=iso())?'<button class="link" data-act="clearPins">Clear all upcoming fixed days</button>':''}</p>
+  </div>
+  <div class="card"><h2>General</h2>
     <label class="f">Weight step for +/− buttons (kg)</label><input data-set="step" inputmode="decimal" value="${fw(st.step)}">
     <label class="f">Rest-timer sound</label>
     <div class="chips"><button class="chip ${st.sound?'on':''}" data-act="sound" data-v="1">On</button><button class="chip ${!st.sound?'on':''}" data-act="sound" data-v="0">Off</button></div>
@@ -921,12 +1019,17 @@ document.addEventListener('click', ev=>{
     // today
     case 'startOpen': if(S.active){ go('workout'); break; } openModal(startSheet()); break;
     case 'startGo': startWorkout($('#stKey').value, +$('#stAgo').value); break;
-    case 'skipOpen': skipDraft={type:nextPlan().type, date:iso(), reason:'', instead:'', minutes:'', worth:null, note:''}; openModal(skipSheet()); break;
+    case 'skipOpen': case 'missSkip': { const tp=todayPlan(); const type = a==='skipOpen' && tp.key && tp.key!=='rest'? keyType(tp.key) : nextPlan().type;
+      skipDraft={type, date:a==='missSkip'? v : iso(), reason:'', instead:'', minutes:'', worth:null, note:''}; openModal(skipSheet()); break; }
+    case 'missRest': S.planPins[v]='rest'; save(); closeModal(); render(); break;
+    case 'pin': { const d=t.dataset.d; if(v) S.planPins[d]=v; else delete S.planPins[d]; save(); openModal(daySheet(d)); dayOpen=d; render(); break; }
     case 'skReason': readSkipInputs(); skipDraft.reason=v; openModal(skipSheet()); break;
     case 'skWorth': readSkipInputs(); skipDraft.worth=+v; openModal(skipSheet()); break;
     case 'skSave': readSkipInputs(); if(!skipDraft.reason){ toast('Pick a reason'); break; }
       S.sessions.push({id:uid(), date:skipDraft.date, type:skipDraft.type, status:'skip', skip:{reason:skipDraft.reason, instead:skipDraft.instead, minutes:skipDraft.minutes, worth:skipDraft.worth, note:skipDraft.note}});
-      S.settings.nextOverride=null; save(); closeModal(); render(); toast(`Skip logged. Official count: ${skipStats().total}`);
+      // a skip doesn't use up the workout: it moves to the next training day (unless skips are set to move the rotation on)
+      if(S.settings.skipAdvances) S.settings.nextOverride=null;
+      save(); closeModal(); render(); toast(`Skip logged. Official count: ${skipStats().total}`);
       if(S.settings.icloudAuto) saveToICloud(); break;
     case 'closeModal': closeModal(); break;
     case 'bwSave': { const k=num($('#bwIn').value); if(!k){ toast('Enter a weight'); break;} upsertBW(iso(),k); save(); render(); toast('Bodyweight saved'); if(S.settings.icloudAuto) saveToICloud(); break; }
@@ -984,6 +1087,12 @@ document.addEventListener('click', ev=>{
     case 'override': S.settings.nextOverride=v||null; save(); render(); break;
     case 'restDay': { const d=+v, r=S.settings.restDays; S.settings.restDays = r.includes(d)? r.filter(x=>x!==d) : [...r,d]; save(); render(); break; }
     case 'skipAdv': S.settings.skipAdvances = v==='1'; save(); render(); break;
+    case 'boulder2': S.settings.boulderEvery2nd = v==='1'; save(); render(); break;
+    case 'splitPreset': S.settings.rotation = v.split(','); S.settings.nextOverride=null; save(); render(); toast('Split: '+S.settings.rotation.join(' → ')); break;
+    case 'rotUp': { const i=+t.dataset.i, r=S.settings.rotation; if(i>0){ [r[i-1],r[i]]=[r[i],r[i-1]]; save(); render(); } break; }
+    case 'rotDel': if(S.settings.rotation.length>1){ S.settings.rotation.splice(+t.dataset.i,1); save(); render(); } break;
+    case 'rotAdd': S.settings.rotation.push(TYPES.find(x=>!S.settings.rotation.includes(x))||'Push'); save(); render(); break;
+    case 'clearPins': if(confirm('Remove all upcoming fixed days? They go back to automatic.')){ Object.keys(S.planPins).forEach(d=>{ if(d>=iso()) delete S.planPins[d]; }); save(); render(); } break;
     case 'sound': S.settings.sound = v==='1'; save(); render(); break;
     case 'theme': S.settings.theme=v; save(); render(); break;
     case 'tplTab': tplEdit=v; render(); break;
@@ -1019,6 +1128,7 @@ document.addEventListener('input', ev=>{
 document.addEventListener('change', ev=>{
   const t=ev.target;
   if(t.id==='exSel'){ statsEx=t.value; render(); }
+  if(t.dataset.rot!=null){ S.settings.rotation[+t.dataset.rot]=t.value; S.settings.nextOverride=null; save(); render(); }
   if(t.dataset.tpl==='kind' || t.dataset.tpl==='muscle'){ S.templates[tplEdit].exercises[+t.dataset.i][t.dataset.tpl]=t.value; save(); }
   if((t.id==='importFile' || t.id==='verifyFile') && t.files[0]){
     const r=new FileReader();

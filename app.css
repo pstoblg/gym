@@ -129,3 +129,4 @@ table.tbl th{font-size:12px;color:var(--muted);font-weight:500}
 .hbar{height:10px;border-radius:0 4px 4px 0;background:var(--s2)}
 .empty{padding:24px 0;text-align:center;color:var(--muted)}
 details summary{cursor:pointer}
+.day .st .plan,.cal .st .plan{font-size:10px;font-weight:700;letter-spacing:-.02em}
