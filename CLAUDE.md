@@ -9,7 +9,7 @@ Static PWA (no build step). GitHub Pages serves only the **loader** `index.html`
   - Data model and defaults: `defaultState()`. Upgrades: `migrate()`, which bumps `v`.
   - Storage key `gym.v1`. It falls back to the legacy key `ppl-log.v1` (same github.io origin).
   - Views: welcome wizard (`viewOnboarding`), Today, Workout wizard (`viewWorkout`: warm-up → exercises → stretch → context → final), History (calendar + day details), Stats, Settings.
-  - Training plan: `planDays(n)` lays `settings.rotation` onto training days (not in `restDays`), starting from `rotationState()` (last done workout). `S.planPins[date]` = days fixed by hand; they stay put, and auto days flow around them. A skip does not consume the workout, so it shifts to the next training day. `unaccountedDays()` flags past training days without an entry.
+  - Training plan: `planDays(n)` lays `settings.rotation` onto training days (not in `restDays`), starting from `rotationState()` (last done workout). `S.planPins[date]` = days fixed by hand; they stay put, and auto days flow around them. A skip does not consume the workout, so it shifts to the next training day. `unaccountedDays()` flags past training days without an entry. Moves: pins `rest` (from) + `train` (to), recorded in `S.moves`; `moveCheck()` limits training days in a row to `maxInRow()`.
   - The workout in progress lives in `S.active` and is saved on every change, so a reload resumes exactly where it left off.
   - Must end by setting `window.__gymBooted = true`. Otherwise the loader shows its error screen with rollback.
 - `app.css`: all styles.

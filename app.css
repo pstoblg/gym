@@ -134,3 +134,9 @@ details summary{cursor:pointer}
 .cal .c.cs{background:color-mix(in srgb,var(--bad) 35%,var(--card2))}
 .cal .c{cursor:pointer}
 .legend{flex-wrap:wrap}
+.cal .c.up{background:transparent;border:1.5px dashed var(--muted)}
+.cal .c.cm{background:color-mix(in srgb,var(--warn) 35%,var(--card2))}
+.cal .c.today{outline:2px solid var(--accent);outline-offset:-1px}
+.mv{color:var(--warn);font-weight:800}
+button.mvbtn{background:color-mix(in srgb,var(--warn) 25%,var(--card2))}
+.legend i{vertical-align:-1px}
