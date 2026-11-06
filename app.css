@@ -140,3 +140,13 @@ details summary{cursor:pointer}
 .mv{color:var(--warn);font-weight:800}
 button.mvbtn{background:color-mix(in srgb,var(--warn) 25%,var(--card2))}
 .legend i{vertical-align:-1px}
+.cal .c.tolog{background:color-mix(in srgb,var(--bad) 8%,transparent);border:1.5px dashed var(--bad)}
+.logme{color:var(--bad);font-weight:800;font-size:10px;text-transform:uppercase}
+.topbar{display:flex;justify-content:flex-end;gap:6px;margin:0 0 -6px}
+.topbar button{padding:4px 10px;min-width:34px;font-size:16px}
+details.mtree{border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-bottom:8px;background:var(--card)}
+details.mtree>summary{font-size:15px;padding:4px 0}
+details.mitem{border-left:2px solid var(--line);margin:6px 0 0 6px;padding-left:10px}
+details.mitem>summary{font-size:14px;padding:3px 0}
+details.mitem[open]{border-left-color:var(--accent)}
+mark{background:color-mix(in srgb,var(--warn) 40%,transparent);color:inherit;border-radius:3px;padding:0 1px}

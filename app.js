@@ -113,29 +113,72 @@ function runShortcut(name, input, text){
   location.href = url;
 }
 // Must be called from a tap handler (clipboard access needs a user gesture).
+// Every save carries a fresh marker (backupToken). "Check backup" reads data.json back and compares it with the app.
+const backupJson = () => JSON.stringify(Object.assign({}, S, {active:null}), null, 1);
 function saveToICloud(){
-  const json = JSON.stringify(Object.assign({}, S, {active:null}), null, 1);
+  S.settings.backupToken = uid(); S.settings.backupSavedAt = Date.now(); S.settings.icloudLast = Date.now(); save(false);
+  const json = backupJson();
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(json).then(()=>{
-    S.settings.icloudLast = Date.now(); save(false); runShortcut(S.settings.icloudShortcut||'Gym Save','clipboard');
+    runShortcut(S.settings.icloudShortcut||'Gym Save','clipboard');
   }, e=>toast('Clipboard blocked: '+e.message));
   else toast('Clipboard not available. Use Export backup instead.');
 }
 const icloudDirty = () => (S.lastChange||0) > (S.settings.icloudLast||0);
-// Backup check: save with a fresh token, then the user picks data.json and we compare the token.
-function backupTest(){ S.settings.backupToken = uid(); save(false); saveToICloud(); }
+const backupUnchecked = () => S.settings.backupToken && S.settings.backupCheckedToken !== S.settings.backupToken;
+function backupTest(){ saveToICloud(); }
+// Compare a backup file with the data in the app: newest save? every entry, move, bodyweight, fixed day included?
+function compareBackup(d){
+  const res=[]; const okAll = [];
+  const add = (ok, text) => { res.push({ok, text}); okAll.push(ok); };
+  const st=d.settings||{};
+  add(st.backupToken && st.backupToken===S.settings.backupToken,
+    st.backupToken===S.settings.backupToken? `Newest save (${new Date(S.settings.backupSavedAt||Date.now()).toLocaleString('de-CH',{dateStyle:'short',timeStyle:'short'})})` : 'This is an older save, not the newest one');
+  const ids = new Set((d.sessions||[]).map(s=>s.id));
+  const missing = S.sessions.filter(s=>!ids.has(s.id));
+  const last = sortSessions(S.sessions).pop();
+  add(!missing.length, missing.length? `${missing.length} entr${missing.length>1?'ies are':'y is'} missing: ${missing.slice(0,3).map(s=>fmtDate(s.date)+' '+s.type+(s.status==='skip'?' (skip)':'')).join(', ')}${missing.length>3?' …':''}`
+    : `All ${S.sessions.length} workouts and skips included${last?` (latest: ${fmtDate(last.date)} ${last.type}${last.status==='skip'?' skip':''})`:''}`);
+  const mIds = new Set((d.moves||[]).map(m=>m.id)), mMiss = S.moves.filter(m=>!mIds.has(m.id)).length;
+  add(!mMiss, mMiss? `${mMiss} moved workout(s) missing` : `All ${S.moves.length} moved workouts included`);
+  const bwMiss = S.bodyweight.filter(b=>!(d.bodyweight||[]).some(x=>x.date===b.date && x.kg===b.kg)).length;
+  add(!bwMiss, bwMiss? `${bwMiss} bodyweight entr${bwMiss>1?'ies':'y'} missing` : `All ${S.bodyweight.length} bodyweight entries included`);
+  const pinsOk = JSON.stringify(d.planPins||{})===JSON.stringify(S.planPins);
+  add(pinsOk, pinsOk? 'Training plan and fixed days included' : 'Training plan differs from the app');
+  const newer = (S.lastChange||0) > (st.backupSavedAt||st.icloudLast||0) + 2000;
+  if(newer) add(false, 'You changed something after this save → save again');
+  return {res, ok: okAll.every(Boolean)};
+}
 function verifyBackupFile(text){
-  try{
-    const d = JSON.parse(text);
-    if(!d.settings || !d.settings.backupToken) throw new Error('This file has no test marker. Run the test backup first.');
-    if(d.settings.backupToken !== S.settings.backupToken) throw new Error('This is an older backup. Run the test again and pick the new data.json.');
-    S.settings.backupVerified = Date.now(); save(false); render(); toast('iCloud backup works ✓');
-  }catch(e){ toast('Check failed: '+e.message); }
+  let d; try{ d = JSON.parse(text); }catch(e){ toast('This is not a Gym backup file'); return; }
+  if(!d.v || !Array.isArray(d.sessions)){ toast('This is not a Gym backup file'); return; }
+  const r = compareBackup(d);
+  if(r.ok){ S.settings.backupVerified = Date.now(); S.settings.backupCheckedToken = S.settings.backupToken; save(false); }
+  render();
+  openModal(`<h2>${r.ok? '<span class="ok">✓ Backup is complete and up to date</span>' : '<span class="err">⚠ Backup is not up to date</span>'}</h2>
+    <table class="tbl">${r.res.map(x=>`<tr><td style="width:24px">${x.ok?'✅':'⚠️'}</td><td class="small">${esc(x.text)}</td></tr>`).join('')}</table>
+    ${r.ok? '<p class="small ink2">Your data is safe in iCloud Drive.</p>' : '<button class="primary big" style="margin-top:12px" data-act="icloudSave">Save to iCloud again</button><p class="small muted">Then check again and pick the new data.json.</p>'}
+    <button class="big" style="margin-top:10px" data-act="closeModal">Close</button>`);
 }
 function backupCheckHtml(){
   const st=S.settings;
-  return `<div class="small" style="margin:6px 0 10px">Status: ${st.backupVerified? `<span class="ok">✓ verified ${new Date(st.backupVerified).toLocaleDateString('de-CH')}</span>` : '<span class="err">not verified yet</span>'}</div>
-  <button class="primary big" data-act="bkTest">1. Run test backup</button>
-  <button class="big" style="margin-top:8px" data-act="bkVerify" ${st.backupToken?'':'disabled'}>2. Pick Gym/data.json to confirm</button>`;
+  const status = !st.backupToken? '<span class="err">no backup saved yet</span>'
+    : backupUnchecked()? `<span style="color:var(--warn)">saved ${new Date(st.backupSavedAt||st.icloudLast).toLocaleString('de-CH',{dateStyle:'short',timeStyle:'short'})}, not checked yet</span>`
+    : `<span class="ok">✓ checked, complete (${new Date(st.backupVerified).toLocaleString('de-CH',{dateStyle:'short',timeStyle:'short'})})</span>`;
+  return `<div class="small" style="margin:6px 0 10px">Status: ${status}${icloudDirty()&&st.backupToken?' · <span style="color:var(--warn)">changes since then</span>':''}</div>
+  <button class="primary big" data-act="bkTest">1. Save backup now</button>
+  <button class="big" style="margin-top:8px" data-act="bkVerify" ${st.backupToken?'':'disabled'}>2. ✓ Check backup (pick Gym/data.json)</button>`;
+}
+// Plain copy of all data, e.g. to paste into a note in the Notes app (and restore from there).
+function copyAllData(){
+  if(!(navigator.clipboard && navigator.clipboard.writeText)){ toast('Clipboard not available'); return; }
+  navigator.clipboard.writeText(backupJson()).then(()=>toast(`All data copied (${S.sessions.length} entries). Paste it into a note.`), e=>toast('Copy failed: '+e.message));
+}
+async function restoreFromClipboard(){
+  try{
+    const d = JSON.parse(await navigator.clipboard.readText());
+    if(!d.v || !Array.isArray(d.sessions)) throw new Error('the clipboard does not contain Gym data');
+    if(confirm(`Restore ${d.sessions.length} entries from the clipboard? This replaces the data on this device.`)){ S=migrate(d); if(S.profile.name) S.profile.onboarded=true; save(); go('today'); toast('Data restored'); }
+  }catch(e){ toast('Restore failed: '+e.message); }
 }
 function shortcutSaveSteps(){
   const n = esc(S.settings.icloudShortcut||'Gym Save');
@@ -258,32 +301,74 @@ function planDays(n){
   return out;
 }
 
-/* ---- moving a workout to a nearby rest day ----
-   The planned day becomes a rest day (pin 'rest') and the rest day becomes a training day (pin 'train').
-   Allowed without warning when it doesn't create more training days in a row than the limit. Every move is kept in S.moves for stats. */
+/* ---- moving a workout ----
+   Move day F → day T (up to 3 days before/after): F becomes a rest day, T becomes a training day that simply gets
+   the next workout of the rotation (a fixed 📌 workout on F travels along). If T already was a training day,
+   the following days shift by one. Nothing is logged for T unless T is already in the past.
+   Every move is kept in S.moves (with the previous pins, so Undo restores exactly). A manual plan change
+   on F or T replaces the move. Too many training days in a row only warns, it never blocks. */
+function setTrainingIn(pins, d, on){
+  const p=pins[d], def=!isRestDay(d);
+  if(on){ if(p && p!=='rest') return; if(def) delete pins[d]; else pins[d]='train'; }
+  else { if(def) pins[d]='rest'; else delete pins[d]; }
+}
+function applyMoveTo(pins, from, to){
+  const fixed = pins[from] && pins[from]!=='rest' && pins[from]!=='train'? pins[from] : null;
+  setTrainingIn(pins, from, false); setTrainingIn(pins, to, true);
+  if(fixed) pins[to]=fixed;
+}
 function weeklyMaxRun(){ // longest run of training days in the weekly schedule (wraps around the week)
   const train=[0,1,2,3,4,5,6].map(i=>!S.settings.restDays.includes(i)); if(train.every(Boolean)) return 7;
   let best=0, run=0; for(let i=0;i<14;i++){ if(train[i%7]){ run++; best=Math.max(best,run); } else run=0; } return best;
 }
 const maxInRow = () => S.settings.maxInRow || weeklyMaxRun();
 function trainingOn(d, pins){ if(S.sessions.some(s=>s.date===d && s.status==='done')) return true; const p=pins[d]; return p? p!=='rest' : !isRestDay(d); }
+// length of the run of consecutive training days that contains day d
+function runAt(d, pins){
+  if(!trainingOn(d,pins)) return 0;
+  let n=1; for(let x=addDays(d,-1); trainingOn(x,pins) && n<30; x=addDays(x,-1)) n++;
+  for(let x=addDays(d,1); trainingOn(x,pins) && n<30; x=addDays(x,1)) n++;
+  return n;
+}
 function moveCheck(from, to){
-  const pins = Object.assign({}, S.planPins, {[from]:'rest', [to]:'train'});
-  const a = addDays(from<to?from:to, -7), n = daysBetween(a, addDays(from<to?to:from, 7));
-  let run=0, max=0; for(let i=0;i<=n;i++){ if(trainingOn(addDays(a,i), pins)){ run++; max=Math.max(max,run); } else run=0; }
-  return {run:max, ok:max<=maxInRow()};
+  const pins = Object.assign({}, S.planPins); applyMoveTo(pins, from, to);
+  const run = runAt(to, pins);
+  return {run, ok: run<=maxInRow(), wasTraining: trainingOn(to, S.planPins)};
 }
 function moveCandidates(from){
   const out=[];
   for(const off of [-3,-2,-1,1,2,3]){ const d=addDays(from,off);
-    if(S.sessions.some(s=>s.date===d)) continue;
-    const p=S.planPins[d]; if(!(p? p==='rest' : isRestDay(d))) continue;
-    if(S.moves.some(m=>m.from===d)) continue; // already freed by another move
+    if(S.sessions.some(s=>s.date===d)) continue;            // already logged
+    if(S.moves.some(m=>m.from===d)) continue;               // freed by another move
     out.push(Object.assign({date:d}, moveCheck(from,d))); }
   return out;
 }
 function plannedKeyOn(d){ const p=planFor(d); return p && p.key && p.key!=='rest'? p.key : nextPlan().key; }
-function undoMove(id){ const m=S.moves.find(x=>x.id===id); if(!m) return; if(S.planPins[m.from]==='rest') delete S.planPins[m.from]; if(S.planPins[m.to]==='train') delete S.planPins[m.to]; S.moves=S.moves.filter(x=>x.id!==id); }
+function doMove(from, to){
+  const prev = {from: S.planPins[from]??null, to: S.planPins[to]??null};
+  const c = moveCheck(from, to), key = plannedKeyOn(from);
+  applyMoveTo(S.planPins, from, to);
+  const m = {id:uid(), from, to, key, run:c.run, ok:c.ok, prev, at:Date.now()};
+  S.moves.push(m); return m;
+}
+function undoMove(id){
+  const m=S.moves.find(x=>x.id===id); if(!m) return;
+  const restore = (d,v) => { if(v==null) delete S.planPins[d]; else S.planPins[d]=v; };
+  if(m.prev){ restore(m.from, m.prev.from); restore(m.to, m.prev.to); }
+  else { if(S.planPins[m.from]==='rest') delete S.planPins[m.from]; if(S.planPins[m.to]==='train') delete S.planPins[m.to]; }
+  S.moves=S.moves.filter(x=>x.id!==id);
+}
+// upcoming runs of training days longer than the limit (shown as a warning on Today)
+function longRuns(days){
+  const out=[]; let start=null, len=0;
+  const end = addDays(iso(), days);
+  for(let d=addDays(iso(),-3); d<=end; d=addDays(d,1)){
+    if(trainingOn(d, S.planPins)){ if(!len) start=d; len++; }
+    else { if(len>maxInRow() && addDays(start,len-1)>=iso()) out.push({start, end:addDays(start,len-1), len}); len=0; }
+  }
+  if(len>maxInRow()) out.push({start, end:addDays(start,len-1), len});
+  return out;
+}
 function planFor(d){ const n=daysBetween(iso(),d); return n<0? null : planDays(n+1)[n]; }
 function autoKeyFor(d){ const p=S.planPins[d]; delete S.planPins[d]; const r=planFor(d); if(p) S.planPins[d]=p; return r? r.key : null; }
 function nextPlan(){ const k = takeNext(rotationState()); return {type:keyType(k), boulder:k==='PullBoulder', key:k}; }
@@ -291,9 +376,14 @@ function todayPlan(){ return planDays(1)[0]; }
 function nextTraining(){ return planDays(21).slice(1).find(p=>p.key && p.key!=='rest'); }
 function isRestDay(dateISO){ return S.settings.restDays.includes(parseISO(dateISO).getDay()); }
 // Past planned training days without any entry: the plan must not silently hide skips.
+// Tracking starts at the first thing ever logged (entry or move) or the setup day, whichever is earlier.
+function firstTrackedDay(){
+  const ds=[S.settings.planStart, ...S.sessions.map(s=>s.date), ...S.moves.map(m=>m.from), ...S.moves.map(m=>m.to)].filter(Boolean).sort();
+  return ds[0] || iso();
+}
 function unaccountedDays(){
-  const out=[], today=iso(), start=S.settings.planStart||today;
-  for(let i=14;i>=1;i--){ const d=addDays(today,-i); if(d<start || S.sessions.some(s=>s.date===d)) continue;
+  const out=[], today=iso(), start=firstTrackedDay();
+  for(let i=120;i>=1;i--){ const d=addDays(today,-i); if(d<start || S.sessions.some(s=>s.date===d)) continue;
     const pin=S.planPins[d]; if(pin==='rest' || (!pin && isRestDay(d))) continue; out.push(d); }
   return out;
 }
@@ -324,7 +414,8 @@ function render(){
   applyTheme(); renderTabs();
   if(!S.profile.onboarded){ $('#app').innerHTML = viewOnboarding(); renderTimer(); return; }
   if(VIEW==='workout' && !S.active) VIEW='today';
-  $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
+  const topbar = `<div class="topbar">${window.GymLoader?'<button class="icon ghost" data-act="updCheck" title="Check for updates">⟳</button>':''}<button class="icon ghost" data-act="manual" title="Manual">ⓘ</button></div>`;
+  $('#app').innerHTML = topbar + updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
   if (VIEW==='stats') mountCharts();
   renderTimer(); tick();
 }
@@ -361,7 +452,7 @@ function viewOnboarding(){
     <p class="ink2 small">After every workout the app saves <b>data.json</b> to <b>iCloud Drive/Gym</b> through an Apple Shortcut. Set it up once (about 2 minutes):</p>
     <div class="card">${shortcutSaveSteps()}</div>
     <div class="card"><b>Check that it works</b>
-      <p class="small ink2" style="margin:6px 0 0">Tap 1: the Shortcut saves a test backup. Come back here and tap 2, then pick <b>iCloud Drive → Gym → data.json</b>. The app checks it's the backup it just sent.</p>
+      <p class="small ink2" style="margin:6px 0 0">Tap 1: the Shortcut saves a backup. Come back here and tap 2, then pick <b>iCloud Drive → Gym → data.json</b>. The app reads it back and checks that it's the newest save and that every entry is in it. You can do this check after any save.</p>
       ${backupCheckHtml()}</div>
     ${nav(st.backupVerified?'Next':'Skip for now')}`;
   else if(step===4) body = `<h1>Apple Health <span class="pill">optional</span></h1>
@@ -394,7 +485,7 @@ function dayCell(d, planMap, missing){
   if(S.moves.some(m=>m.from===d)) return '<span class="mv">↔</span>';
   const p=planMap[d];
   if(p && p.key) return p.key==='rest'? `<span class="muted">${p.pinned?'📌':''}–</span>` : `<span class="plan t-${keyType(p.key)}">${p.pinned?'📌':p.moved?'↔':''}${keyShort(p.key)}</span>`;
-  if(missing.includes(d)) return '<span style="color:var(--warn);font-weight:700">?</span>';
+  if(missing.includes(d)) return '<span class="logme">log</span>';
   return isRestDay(d)?'<span class="muted">–</span>':'<span class="muted">·</span>';
 }
 // One calendar cell (Today's 2-week view and the month view). Upcoming planned training days get a dashed outline.
@@ -402,12 +493,13 @@ function calCell(ds, planMap, missing, showMonth){
   const today=iso(), list=S.sessions.filter(s=>s.date===ds), movedFrom=S.moves.some(m=>m.from===ds), p=planMap[ds];
   let cls = list.some(s=>s.status==='done')? 'cd' : list.length? 'cs' : movedFrom? 'cm' : '';
   if(!list.length && !movedFrom && ds>=today && p && p.key && p.key!=='rest') cls += ' up';
+  if(missing.includes(ds)) cls += ' tolog';
   const cell = (ds<today && !list.length && !missing.includes(ds) && !movedFrom)? '' : dayCell(ds, planMap, missing);
   const dd=parseISO(ds), label = showMonth && dd.getDate()===1? `${dd.getDate()}.${dd.getMonth()+1}.` : dd.getDate();
   return `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${label}</div><div class="st">${cell}</div></div>`;
 }
 const CAL_HEAD = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
-const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:color-mix(in srgb,var(--good) 35%,var(--card2))"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 35%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 35%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span>📌 fixed · <b style="color:var(--warn)">?</b> no entry</span></div>`;
+const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:color-mix(in srgb,var(--good) 35%,var(--card2))"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 35%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 35%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span>📌 fixed</span></div>`;
 function planMapUntil(lastDate){ const n=daysBetween(iso(), lastDate); const m={}; if(n>=0) planDays(n+1).forEach(p=>m[p.date]=p); return m; }
 function greeting(){ const h=new Date().getHours(); return h<11?'Good morning':h<17?'Hi':'Good evening'; }
 function viewToday(){
@@ -419,12 +511,13 @@ function viewToday(){
   for(let i=0;i<14;i++) cells += calCell(addDays(mon,i), planMap, missing, true);
   const ago = S.settings.icloudLast? Math.floor((Date.now()-S.settings.icloudLast)/86400000) : null;
   let banner = '';
-  if(missing.length && !S.active) banner += `<div class="card" style="border-color:var(--warn)"><b>Planned training without an entry</b>
-    <p class="small ink2" style="margin:4px 0 6px">Skips are never hidden. What happened?</p>
-    ${missing.map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>
+  if(missing.length && !S.active) banner += `<div class="card" style="border-color:var(--bad);border-style:dashed"><b style="color:var(--bad)">${missing.length} day${missing.length>1?'s':''} to log</b>
+    <p class="small ink2" style="margin:4px 0 6px">Planned training without an entry. Skips are never hidden: what happened?${missing.length>4?' Showing the oldest 4; the rest are marked red dashed in the calendar.':''}</p>
+    ${missing.slice(0,4).map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>
       <span class="row"><button class="small no" data-act="missSkip" data-v="${d}">Skipped</button><button class="small" data-act="manualOpen" data-v="${d}">Trained</button><button class="small mvbtn" data-act="moveOpen" data-v="${d}">Moved</button></span></div>`).join('')}
     <button class="link" style="font-size:12px" data-act="missRest" data-v="${missing[0]}">${fmtDate(missing[0])} was planned wrong, it was a rest day</button></div>`;
-  if(!S.active && !S.settings.backupVerified) banner += `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>iCloud backup not verified</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Check</button></div>`;
+  if(!S.active && !S.settings.backupToken) banner += `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>No iCloud backup yet</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Set up</button></div>`;
+  else if(!S.active && !icloudDirty() && backupUnchecked()) banner += `<div class="card row between" style="border-color:var(--accent)"><div class="small"><b>Backup saved ${fmtTime(S.settings.backupSavedAt||S.settings.icloudLast)}</b><br><span class="muted">Check that it arrived complete in iCloud.</span></div><button class="primary" data-act="bkVerify">✓ Check</button></div>`;
   else if(!S.active && icloudDirty()) banner += `<div class="card row between" style="border-color:var(--warn)">
     <div class="small"><b>Not saved to iCloud</b><br><span class="muted">${ago==null?'Never synced yet':'Last sync '+(ago===0?'today':ago+' day(s) ago')}</span></div>
     <button class="primary" data-act="icloudSave">Save</button></div>`;
@@ -446,10 +539,12 @@ function viewToday(){
       ${!doneToday && !rest? '<button class="link" data-act="moveOpen" data-v="'+today+'">↔ Move today’s workout to a rest day</button>' : ''}
     </div>`;
   }
-  return `<div class="row between"><h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${window.GymLoader?'<button class="icon ghost" data-act="updCheck" title="Check for updates">⟳</button>':''}</div>${banner}${healthPasteBtn()}${main}
+  const runs = longRuns(13);
+  return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}
   <div class="card">
     <div class="row between" style="margin-bottom:8px"><h2 style="margin:0">This & next week</h2><button class="small ghost" data-act="monthView">📅 Month</button></div>
     <div class="cal">${cells}</div>
+    ${runs.map(r=>`<p class="small err" style="margin:8px 0 0">⚠ ${r.len} training days in a row: ${fmtDate(r.start)} – ${fmtDate(r.end)} (your limit: ${maxInRow()}). Consider a rest day in between: tap a day to change it.</p>`).join('')}
     ${CAL_LEGEND}
     <p class="small muted" style="margin:6px 0 0">Tap a day to see it, plan it, move it, or add a workout or skip. <button class="link" style="font-size:13px" data-act="tab" data-v="settings">Edit plan</button></p>
   </div>
@@ -671,14 +766,15 @@ function skipSheet(){
   const modeSeg = d.showMode? `<div class="seg"><button class="${d.mode==='done'?'on':''}" data-act="entMode" data-v="done">💪 Workout</button><button class="${isSkip?'on':''}" data-act="entMode" data-v="skip">✕ Skip</button><button class="${d.mode==='move'?'on':''}" data-act="entMode" data-v="move">↔ Moved</button></div>` : '';
   if(d.mode==='move'){
     const from=d.date, key=plannedKeyOn(from), cands=moveCandidates(from), sel=cands.find(c=>c.date===d.moveTo), today=iso();
-    return `<h2>${d.showMode?'Add entry':'Move workout'}</h2>${modeSeg}
-    <p class="small ink2">Move the training of <b>${fmtDate(from)}</b>${from>=today?` (<b>${esc(keyLabel(key))}</b>)`:''} to a rest day nearby. ${fmtDate(from)} becomes a rest day; the rotation simply continues. Not counted as a skip.</p>
+    return `<div class="row between"><h2 style="margin:0">${d.showMode?'Add entry':'Move workout'}</h2><button class="link" data-act="manual" data-v="move">ⓘ How moving works</button></div>${modeSeg}
+    <p class="small ink2">${fmtDate(from)}${from>=today?` (<b>${esc(keyLabel(key))}</b>)`:''} becomes a rest day. The day you pick becomes a training day with the <b>next workout of your rotation</b>; the days after it adjust. Not counted as a skip.</p>
     <label class="f">Move to</label>
-    ${cands.length? `<div class="chips">${cands.map(c=>`<button class="chip ${d.moveTo===c.date?'on':''}" data-act="mvPick" data-v="${c.date}">${fmtDate(c.date)}${c.ok?' ✓':' ⚠'}</button>`).join('')}</div>`
-      : '<p class="small" style="color:var(--warn)">No free rest day within 3 days. Log it as a skip instead.</p>'}
-    ${sel? (sel.ok? `<p class="small ok">✓ Fine for your routine: at most ${sel.run} training days in a row.</p>`
-      : `<p class="small err">⚠ That makes ${sel.run} training days in a row (your limit: ${maxInRow()}). Too much training packed together. Recovery comes first.</p>`) : ''}
-    ${sel && sel.date<=today? `<label class="f">What did you train on ${fmtDate(sel.date)}?</label><select id="enKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${d.key===w.key?'selected':''}>${w.label}</option>`).join('')}</select>` : ''}
+    ${cands.length? `<div class="chips">${cands.map(c=>`<button class="chip ${d.moveTo===c.date?'on':''}" data-act="mvPick" data-v="${c.date}">${fmtDate(c.date)} ${c.ok?'✓':'⚠'+c.run}</button>`).join('')}</div>`
+      : '<p class="small" style="color:var(--warn)">No free day within 3 days. Log it as a skip instead.</p>'}
+    ${sel? `<p class="small ink2" style="margin:8px 0 0">${sel.wasTraining? `${fmtDate(sel.date)} is already a training day: your following workouts shift by one day.` : `${fmtDate(sel.date)} was a rest day and becomes a training day.`}</p>
+      ${sel.ok? `<p class="small ok">✓ Fine for your routine: ${sel.run} training day${sel.run>1?'s':''} in a row.</p>`
+      : `<p class="small err">⚠ That makes ${sel.run} training days in a row (your limit: ${maxInRow()}). Possible, but recovery comes first.</p>`}` : ''}
+    ${sel && sel.date<today? `<label class="f">What did you train on ${fmtDate(sel.date)}?</label><select id="enKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${d.key===w.key?'selected':''}>${w.label}</option>`).join('')}<option value="">Didn't train that day either</option></select>` : ''}
     <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button>
       <button class="big ${sel && !sel.ok?'danger':'primary'}" data-act="mvSave" ${sel?'':'disabled'}>${sel && !sel.ok?'Move anyway':'Save move'}</button></div>`;
   }
@@ -1069,7 +1165,9 @@ function viewSettings(){
   </div>
   <div class="card"><h2>App version</h2>${versionHtml()}</div>
   <div class="card"><h2>Data</h2>
-    <div class="grid2"><button data-act="export">Export backup</button><button data-act="importBtn">Import backup</button></div>
+    <p class="small ink2">Extra safety: copy all data as text and paste it into a note (Notes app). You can restore it from there the same way.</p>
+    <div class="grid2"><button data-act="copyAll">📋 Copy all data</button><button data-act="pasteAll">Restore from clipboard</button></div>
+    <div class="grid2" style="margin-top:8px"><button data-act="export">Export backup file</button><button data-act="importBtn">Import backup file</button></div>
     <button class="danger big" style="margin-top:10px" data-act="wipe">Delete all data</button>
     <p class="small muted">${S.sessions.length} entries · ${S.bodyweight.length} bodyweight logs · stored on this device only</p>
   </div>`;
@@ -1090,6 +1188,87 @@ function versionHtml(){
 function onUpdateReady(){ toast('New version available'); if(!$('#modal').innerHTML) render(); }
 const updateBanner = () => window.GymLoader && GymLoader.updateReady && S.profile.onboarded
   ? `<div class="card row between" style="border-color:var(--accent);background:var(--accent-soft)"><div class="small"><b>New version available</b><br><span class="muted">Your data stays as it is.${S.active?' Your workout continues after the refresh.':''}</span></div><button class="primary" data-act="updApply">⟳ Refresh</button></div>` : '';
+
+/* ================= manual (ⓘ, top right) ================= */
+// Tree: sections → topics. "where" tells the user where to find it in the app.
+const MANUAL = [
+  {id:'start', title:'🏠 Today', items:[
+    {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Below: the calendar for this and next week, your skip counter and bodyweight.'},
+    {id:'cal2w', title:'2-week calendar', where:'Today → This & next week', text:'Green = trained, red = skipped, amber ↔ = moved, dashed outline = planned (upcoming), red dashed "LOG" = planned training day in the past without an entry. 📌 = day fixed by hand. Tap any day to see, plan, move or log it. "📅 Month" opens the month view.'},
+    {id:'tolog', title:'"To log" days (red dashed)', where:'Today → "days to log" card · calendars', text:'Every past training day of your plan needs an entry: Workout, Skip or Moved. Until then it is marked red dashed with "LOG". This starts at your first ever entry, so the past always adds up. If the plan itself was wrong, choose "it was a rest day".'},
+    {id:'bw', title:'Bodyweight', where:'Today → Bodyweight', text:'Enter your weight; the chart is in Stats. Bodyweight exercises (pull-ups, dips) use it for the total kg.'},
+  ]},
+  {id:'plan', title:'📅 Training plan', items:[
+    {id:'split', title:'Split & rotation', where:'Settings → Training plan', text:'Your split (e.g. Push → Legs → Pull) repeats forever on your training days. Presets or your own order. The rotation always continues from the last workout you actually did.'},
+    {id:'days', title:'Training days & rest days', where:'Settings → Training plan → Training days', text:'Tap the weekdays you train. The others are rest days.'},
+    {id:'boulder', title:'Bouldering every 2nd Pull', where:'Settings → Training plan', text:'If on, every second Pull day becomes "Pull + Boulder" with its own exercises.'},
+    {id:'fixed', title:'Fix a day by hand (📌)', where:'Tap a future day → Plan for this day', text:'Choose Push, Legs, Pull, Pull + Boulder or Rest. A fixed day stays as it is, whatever happens before it. "Auto" releases it. Fixing a day by hand also replaces a move on that day.'},
+    {id:'skip', title:'Skip', where:'Today → Log skip · or tap a past day → ✕ Skip', text:'Counts as an official skip with reason, what you did instead, time gained and "worth it?". The skipped workout is not used up: it moves to the next training day and everything after shifts by one training day. (Can be changed in Settings.)'},
+    {id:'move', title:'Move a workout', where:'Today → "Move today’s workout" · tap a day → ↔ Move · past day → ↔ Moved', text:'Pick a day up to 3 days before/after. The original day becomes a rest day; the new day becomes a training day with the NEXT workout of your rotation (a 📌 fixed workout travels along). If the new day already was a training day, the following days shift by one. Not a skip. If the new day is today or later nothing is logged yet: you train (or skip) it normally. If it is in the past you say what you trained. "Undo move" restores the exact previous plan.'},
+    {id:'inrow', title:'Too many days in a row', where:'Move sheet · Today calendar · Settings → Max training days in a row', text:'The limit comes from your week (e.g. Mo-Tu-We + Fr-Sa = 3) or can be set by hand. Moves that exceed it show ⚠ and "Move anyway"; Today warns about upcoming runs that are too long. It never blocks you.'},
+    {id:'other', title:'Doing another workout than planned', where:'Start workout → dropdown', text:'Just pick it. The plan for the next days adjusts automatically.'},
+  ]},
+  {id:'wo', title:'🏋️ Workout', items:[
+    {id:'startwo', title:'Start a workout', where:'Today → Start workout', text:'Choose what you train (planned one is preselected) and when you started (now or X min ago).'},
+    {id:'wizard', title:'Step by step (wizard)', where:'Workout tab', text:'Warm-up first, then one exercise per screen. Each step starts when the previous one ends. "Next" saves the values shown, even if you didn’t touch them.'},
+    {id:'weights', title:'Weights & reps', where:'Workout → exercise', text:'Pre-filled from last time. +/− changes by your step (default 0.25 kg) and also changes the following sets with the same value. Bodyweight exercises show total kg (bodyweight + extra).'},
+    {id:'rest', title:'Rest timer', where:'Workout → ✓ on a set', text:'Ticking a set starts the rest timer of that exercise (beeps at 0). −15/+15 adjust it. Change the rest time with "Rest …s".'},
+    {id:'earlier', title:'Finished earlier…', where:'Workout → under the Next button', text:'Forgot to tap Next? Pick how many minutes ago you finished. Works for exercises, stretching and the whole workout.'},
+    {id:'endearly', title:'End workout early', where:'Workout → bottom', text:'Ends the workout (with "finished X min ago"). The current exercise counts, the remaining ones are marked as skipped.'},
+    {id:'stretch', title:'Stretching & time pressure', where:'After the last exercise', text:'Green Yes / red No for stretching (timed if yes). Then: time-limited or no plans after. Both are tracked in Stats.'},
+    {id:'reload', title:'Nothing gets lost', where:'—', text:'The workout is saved on every tap. Closing the app or a reload continues exactly where you were.'},
+  ]},
+  {id:'hist', title:'📖 History & days', items:[
+    {id:'dayd', title:'Day details', where:'Tap any day', text:'Shows the workout with times, sets and "▲ +2.5 kg vs. last time", skips with reason, moves (with Undo), and the plan for upcoming days.'},
+    {id:'past', title:'Add something afterwards', where:'Tap a past day → + Add entry', text:'Switch between 💪 Workout, ✕ Skip and ↔ Moved. Reasons only appear for skips.'},
+    {id:'month', title:'Month view', where:'Today → 📅 Month · History · Stats', text:'Whole month with the same colors, plus workouts, skips, moves and adherence for that month. ‹ › switches months.'},
+  ]},
+  {id:'stats', title:'📊 Stats', items:[
+    {id:'muscle', title:'Muscle progress', where:'Stats', text:'Per muscle group and exercise: heaviest weight (or longest hold) first vs. latest in the chosen period.'},
+    {id:'moved', title:'Moved workouts', where:'Stats → Moved workouts', text:'How often you moved, share of planned days, which weekday you move from most, moves that broke your limit, recent list.'},
+    {id:'opp', title:'Skips & opportunity cost', where:'Stats', text:'Skip reasons, estimated missed volume and sets, time used elsewhere and your "worth it?" average.'},
+    {id:'habits', title:'Stretching, time pressure, feeling', where:'Stats', text:'Stretch rate, time-limited vs. relaxed workouts, feeling and energy vs. performance, Apple Health averages, bodyweight chart.'},
+  ]},
+  {id:'safe', title:'☁️ Backup & data', items:[
+    {id:'where', title:'Where your data is', where:'—', text:'Only on this iPhone (in the app) and in your own iCloud Drive (Gym/data.json). Nothing goes to any server; the app code comes from GitHub, your data never does.'},
+    {id:'icloud', title:'iCloud backup (Gym Save)', where:'Settings → iCloud Drive backup', text:'After every workout, skip, move and bodyweight entry the app runs the Shortcut "Gym Save", which saves data.json (latest) and a dated copy in Gym/backups. Setup steps are in Settings.'},
+    {id:'check', title:'✓ Check backup', where:'Today banner after a save · Settings → Check backup', text:'Pick Gym/data.json. The app reads it back and checks: is it the newest save, are all workouts/skips/moves/bodyweight/plan included, nothing changed since. Shows a checklist; if something is missing: save again.'},
+    {id:'notes', title:'Copy all data (Notes)', where:'Settings → Data → 📋 Copy all data', text:'Copies everything as text; paste it into a note. "Restore from clipboard" brings it back (copy the note’s text first).'},
+    {id:'restore', title:'Restore / new phone', where:'Welcome screen or Settings → Restore from data.json', text:'Pick data.json (or a dated backup). Replaces the data on this device.'},
+  ]},
+  {id:'health', title:'❤️ Apple Health', items:[
+    {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". Calories and heart rate need the Apple Watch. Setup in Settings → Apple Health.'},
+  ]},
+  {id:'app', title:'⚙️ App & updates', items:[
+    {id:'upd', title:'Updates & ⟳ Refresh', where:'Top right ⟳ · banner "New version available"', text:'The app checks for a new version on every start. When one is found, tap "⟳ Refresh". Your data and a running workout stay. Works offline with the last version.'},
+    {id:'rollback', title:'Go back to the previous version', where:'Settings → App version', text:'If a new version misbehaves, go back; updates pause until you resume them.'},
+    {id:'templates', title:'Exercises & warm-ups', where:'Settings → Workout templates', text:'Per workout: warm-up text and minutes, exercises with type, muscle, sets, target and rest time.'},
+    {id:'wizardagain', title:'Welcome wizard again', where:'Settings → Profile', text:'Runs the setup again (name, plan, backup). Your data stays.'},
+  ]},
+];
+let manualQuery='';
+function manualSheet(focus){
+  const q = manualQuery.trim().toLowerCase();
+  const hl = s => { const e=esc(s); if(!q) return e; return e.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>'); };
+  const match = it => !q || (it.title+' '+it.text+' '+it.where).toLowerCase().includes(q);
+  let hits=0;
+  const tree = MANUAL.map(sec=>{
+    const items = sec.items.filter(match); if(!items.length) return '';
+    hits += items.length;
+    const open = q || focus===sec.id || items.some(i=>i.id===focus);
+    return `<details class="mtree" ${open?'open':''}><summary><b>${esc(sec.title)}</b> <span class="small muted">${items.length}</span></summary>
+      ${items.map(it=>`<details class="mitem" id="man-${it.id}" ${q||focus===it.id?'open':''}><summary>${hl(it.title)}</summary>
+        <div class="small muted">📍 ${hl(it.where)}</div><p class="small ink2" style="margin:4px 0 8px">${hl(it.text)}</p></details>`).join('')}</details>`;
+  }).join('');
+  return `<div class="row between"><h2 style="margin:0">ⓘ Manual</h2><button class="icon" data-act="closeModal">✕</button></div>
+    <input id="manQ" placeholder="Search, e.g. move, skip, backup…" value="${esc(manualQuery)}" style="margin:10px 0" autocomplete="off">
+    <div id="manTree">${tree || '<div class="empty">Nothing found.</div>'}</div>
+    ${q?`<p class="small muted">${hits} topic${hits===1?'':'s'} found</p>`:''}`;
+}
+function openManual(focus){
+  manualQuery=''; openModal(manualSheet(focus));
+  if(focus){ const el=document.getElementById('man-'+focus); if(el) el.scrollIntoView({block:'center'}); }
+}
 
 /* ================= modal ================= */
 function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; }
@@ -1121,10 +1300,9 @@ document.addEventListener('click', ev=>{
     case 'moveOpen': skipDraft=newDraft({mode:'move', showMode:v<iso(), date:v, key:plannedKeyOn(v)}); openModal(skipSheet()); break;
     case 'mvPick': readSkipInputs(); skipDraft.moveTo=v; openModal(skipSheet()); break;
     case 'mvSave': { readSkipInputs(); const d=skipDraft, c=moveCandidates(d.date).find(x=>x.date===d.moveTo); if(!c) break;
-      const key = plannedKeyOn(d.date);
-      S.planPins[d.date]='rest'; S.planPins[c.date]='train';
-      S.moves.push({id:uid(), from:d.date, to:c.date, key, run:c.run, ok:c.ok, at:Date.now()});
-      if(c.date<=iso()){ const w=WORKOUTS.find(x=>x.key===d.key)||WORKOUTS[0]; S.sessions.push({id:uid(), date:c.date, type:w.type, boulder:w.boulder, status:'done', exercises:[], notes:'Moved from '+fmtDate(d.date)}); }
+      doMove(d.date, c.date);
+      // only a day that is already over can be logged right away; today/future days are trained (or skipped) as usual
+      if(c.date<iso() && d.key){ const w=WORKOUTS.find(x=>x.key===d.key)||WORKOUTS[0]; S.sessions.push({id:uid(), date:c.date, type:w.type, boulder:w.boulder, status:'done', exercises:[], notes:'Moved from '+fmtDate(d.date)}); }
       save(); closeModal(); render(); toast(`Moved ${fmtDate(d.date)} → ${fmtDate(c.date)}`);
       if(S.settings.icloudAuto) saveToICloud(); break; }
     case 'undoMove': if(confirm('Undo this move? Both days go back to the normal plan.')){ undoMove(v); save(); closeModal(); render(); } break;
@@ -1132,8 +1310,10 @@ document.addEventListener('click', ev=>{
       S.sessions.push({id:uid(), date:skipDraft.date, type:w.type, boulder:w.boulder, status:'done', exercises:[], notes:skipDraft.note});
       save(); closeModal(); render(); toast(`${w.label} added for ${fmtDate(skipDraft.date)}`);
       if(S.settings.icloudAuto) saveToICloud(); break; }
-    case 'missRest': S.planPins[v]='rest'; save(); closeModal(); render(); break;
-    case 'pin': { const d=t.dataset.d; if(v) S.planPins[d]=v; else delete S.planPins[d]; save(); openModal(daySheet(d)); dayOpen=d; render(); break; }
+    case 'missRest': { const m=S.moves.find(x=>x.to===v); if(m) undoMove(m.id); S.planPins[v]='rest'; save(); closeModal(); render(); break; }
+    case 'pin': { const d=t.dataset.d;
+      const m=S.moves.find(x=>x.from===d || x.to===d); if(m) undoMove(m.id); // a manual plan replaces a move on that day
+      if(v) S.planPins[d]=v; else delete S.planPins[d]; save(); openModal(daySheet(d)); dayOpen=d; render(); break; }
     case 'skReason': readSkipInputs(); skipDraft.reason=v; openModal(skipSheet()); break;
     case 'skWorth': readSkipInputs(); skipDraft.worth=+v; openModal(skipSheet()); break;
     case 'skSave': readSkipInputs(); if(!skipDraft.reason){ toast('Pick a reason'); break; }
@@ -1209,7 +1389,10 @@ document.addEventListener('click', ev=>{
     case 'tplUp': { const i=+t.dataset.i, l=S.templates[tplEdit].exercises; if(i>0){ [l[i-1],l[i]]=[l[i],l[i-1]]; save(); render(); } break; }
     case 'tplReset': if(confirm('Reset this template (warm-up and exercises)?')){ S.templates[tplEdit]=JSON.parse(JSON.stringify(DEFAULT_TEMPLATES[tplEdit])); save(); render(); } break;
     case 'export': exportData(); break;
-    case 'icloudSave': saveToICloud(); break;
+    case 'icloudSave': closeModal(); saveToICloud(); break;
+    case 'copyAll': copyAllData(); break;
+    case 'manual': openManual(v); break;
+    case 'pasteAll': restoreFromClipboard(); break;
     case 'icloudAuto': S.settings.icloudAuto = v==='1'; save(false); render(); break;
     case 'importBtn': $('#importFile').click(); break;
     case 'updCheck': if(window.GymLoader) GymLoader.checkNow(true); break;
@@ -1221,6 +1404,7 @@ document.addEventListener('click', ev=>{
 });
 document.addEventListener('input', ev=>{
   const t=ev.target, W=S.active;
+  if(t.id==='manQ'){ manualQuery=t.value; const tmp=document.createElement('div'); tmp.innerHTML=manualSheet(); $('#manTree').innerHTML=tmp.querySelector('#manTree').innerHTML; return; }
   if(t.dataset.in && W){ const e=curStep(), si=+t.dataset.s, k=t.dataset.in, old=e.sets[si][k];
     e.sets[si][k]=t.value;
     e.sets.slice(si+1).forEach((x,j)=>{ if(!x.done && String(x[k])===String(old)){ x[k]=t.value; const inp=document.querySelector(`[data-in="${k}"][data-s="${si+1+j}"]`); if(inp) inp.value=t.value; } });
