@@ -412,8 +412,9 @@ function viewToday(){
   }
   return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}
   <div class="card">
-    <div class="row between"><h2 style="margin:0">This week</h2><span class="small muted">tap a day to see or plan it</span></div>
+    <div class="row between"><h2 style="margin:0">This week</h2><button class="small ghost" data-act="monthView">📅 Month view</button></div>
     <div class="week">${days}</div>
+    <p class="small muted" style="margin:6px 0 0">Tap a day to see it, plan it, or add a workout or skip.</p>
   </div>
   <div class="card"><div class="row between"><h2 style="margin:0">Next 2 weeks</h2><button class="link" data-act="tab" data-v="settings">Edit plan</button></div>
     ${upcoming || '<div class="empty small">No training days planned. Set your training days in Settings.</div>'}
@@ -628,11 +629,20 @@ function bestE1RM(name){ let best=0; doneSessions().forEach(ses=>(ses.exercises|
 function upsertBW(date,kg){ const i=S.bodyweight.findIndex(b=>b.date===date); if(i>=0) S.bodyweight[i].kg=kg; else S.bodyweight.push({date,kg}); }
 
 /* ---- skip ---- */
+// One sheet for logging a skip and for adding a day afterwards: switch between "Workout" and "Skip".
 let skipDraft=null;
+function newDraft(o){ const np=nextPlan(); return Object.assign({mode:'skip', showMode:false, type:np.type, key:np.key, date:iso(), reason:'', instead:'', minutes:'', worth:null, note:''}, o); }
 function skipSheet(){
-  const d=skipDraft;
-  return `<h2>Log skip</h2>
-  <p class="small ink2">This counts as an official skip.${S.settings.skipAdvances?'':' The rotation does not move on, so the same workout stays next.'}</p>
+  const d=skipDraft, isSkip = d.mode==='skip';
+  const modeSeg = d.showMode? `<div class="seg"><button class="${!isSkip?'on':''}" data-act="entMode" data-v="done">💪 Workout</button><button class="${isSkip?'on':''}" data-act="entMode" data-v="skip">✕ Skip</button></div>` : '';
+  if(!isSkip) return `<h2>Add entry</h2>${modeSeg}
+  <label class="f">Date</label><input type="date" id="skDate" value="${esc(d.date)}">
+  <label class="f">Which workout did you do?</label><select id="enKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${d.key===w.key?'selected':''}>${w.label}</option>`).join('')}</select>
+  <label class="f">Note (optional)</label><input id="skNote" value="${esc(d.note)}">
+  <p class="small muted">Saved without set details. The plan for the coming days adjusts to it.</p>
+  <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="big primary" data-act="entSave">Save workout</button></div>`;
+  return `<h2>${d.showMode?'Add entry':'Log skip'}</h2>${modeSeg}
+  <p class="small ink2">This counts as an official skip.${S.settings.skipAdvances?'':' The skipped workout moves to the next training day.'}</p>
   <label class="f">Workout skipped</label><select id="skType">${TYPES.map(t=>`<option ${d.type===t?'selected':''}>${t}</option>`).join('')}</select>
   <label class="f">Date</label><input type="date" id="skDate" value="${esc(d.date)}">
   <label class="f">Reason</label><div class="chips">${SKIP_REASONS.map(r=>`<button class="chip ${d.reason===r?'on':''}" data-act="skReason" data-v="${esc(r)}">${esc(r)}</button>`).join('')}</div>
@@ -643,18 +653,38 @@ function skipSheet(){
   <label class="f">Note</label><input id="skNote" value="${esc(d.note)}">
   <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="big no" data-act="skSave">Log skip</button></div>`;
 }
-function readSkipInputs(){ skipDraft.type=$('#skType').value; skipDraft.date=$('#skDate').value||iso(); skipDraft.instead=$('#skInstead').value; skipDraft.minutes=$('#skMin').value; skipDraft.note=$('#skNote').value; }
+function readSkipInputs(){
+  const val = id => { const el=document.getElementById(id); return el? el.value : null; };
+  const map = {type:'skType', key:'enKey', date:'skDate', instead:'skInstead', minutes:'skMin', note:'skNote'};
+  for(const [k,id] of Object.entries(map)){ const v=val(id); if(v!=null) skipDraft[k]=v; }
+  if(!skipDraft.date) skipDraft.date=iso();
+}
 
 /* ================= HISTORY & DAY DETAILS ================= */
-function viewHistory(){
+// Month calendar (used in History and Stats): green = trained, red = skipped, labels = planned, ? = no entry
+function monthCalendarHtml(){
   const [y,m] = calMonth.split('-').map(Number);
   const first = new Date(y,m-1,1), startPad=(first.getDay()+6)%7, daysIn=new Date(y,m,0).getDate(), today=iso();
+  const firstDay = `${y}-${pad(m)}-01`, lastDay = `${y}-${pad(m)}-${pad(daysIn)}`;
   let cells = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
   for(let i=0;i<startPad;i++) cells+='<div class="c out"></div>';
-  const lastDay = `${y}-${pad(m)}-${pad(daysIn)}`, planMap = planMapUntil(lastDay), missing = unaccountedDays();
-  for(let d=1; d<=daysIn; d++){ const ds=`${y}-${pad(m)}-${pad(d)}`;
-    const cell = (ds<today && !S.sessions.some(s=>s.date===ds) && !missing.includes(ds))? '' : dayCell(ds, planMap, missing);
-    cells += `<div class="c ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${d}</div><div class="st">${cell}</div></div>`; }
+  const planMap = planMapUntil(lastDay), missing = unaccountedDays();
+  for(let d=1; d<=daysIn; d++){ const ds=`${y}-${pad(m)}-${pad(d)}`, list=S.sessions.filter(s=>s.date===ds);
+    const cls = list.some(s=>s.status==='done')? 'cd' : list.length? 'cs' : '';
+    const cell = (ds<today && !list.length && !missing.includes(ds))? '' : dayCell(ds, planMap, missing);
+    cells += `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${d}</div><div class="st">${cell}</div></div>`; }
+  const inMonth = S.sessions.filter(s=>s.date>=firstDay && s.date<=lastDay);
+  const done = inMonth.filter(s=>s.status==='done').length, skips = inMonth.filter(s=>s.status==='skip').length;
+  const planned = Object.values(planMap).filter(p=>p.date>=firstDay && p.date<=lastDay && p.date>=today && p.key && p.key!=='rest').length;
+  const adher = done+skips? Math.round(done/(done+skips)*100)+'%' : '—';
+  return `<div class="card"><div class="row between" style="margin-bottom:8px"><button class="icon ghost" data-act="calNav" data-v="-1">‹</button><b>${MONTHS[m-1]} ${y}</b><button class="icon ghost" data-act="calNav" data-v="1">›</button></div>
+    <div class="cal">${cells}</div>
+    <div class="grid3" style="margin-top:10px"><div class="stat"><div class="v" style="color:var(--good)">${done}</div><div class="l">Workouts</div></div>
+      <div class="stat"><div class="v" style="color:${skips?'var(--bad)':'inherit'}">${skips}</div><div class="l">Skips</div></div>
+      <div class="stat"><div class="v">${adher}</div><div class="l">Adherence${planned?` · ${planned} still planned`:''}</div></div></div>
+    <div class="legend" style="margin:8px 0 0"><span><i style="background:color-mix(in srgb,var(--good) 35%,var(--card2))"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 35%,var(--card2))"></i>Skipped</span><span>Push/Legs = planned · 📌 fixed · <b style="color:var(--warn)">?</b> no entry</span></div></div>`;
+}
+function viewHistory(){
   let list = sortSessions(S.sessions).reverse();
   if(histFilter!=='all') list = list.filter(s=> histFilter==='skip'? s.status==='skip' : s.type===histFilter && s.status==='done');
   const seg = ['all','Push','Legs','Pull','skip'].map(k=>`<button class="${histFilter===k?'on':''}" data-act="histF" data-v="${k}">${k==='all'?'All':k==='skip'?'Skips':k}</button>`).join('');
@@ -668,8 +698,7 @@ function viewHistory(){
       <span class="muted">›</span></div>`;
   }).join('');
   return `<h1>History</h1>
-  <div class="card"><div class="row between" style="margin-bottom:8px"><button class="icon ghost" data-act="calNav" data-v="-1">‹</button><b>${MONTHS[m-1]} ${y}</b><button class="icon ghost" data-act="calNav" data-v="1">›</button></div>
-  <div class="cal">${cells}</div></div>
+  ${monthCalendarHtml()}
   <div class="seg">${seg}</div>
   <div class="card">${items||'<div class="empty">Nothing logged yet.</div>'}</div>
   <button class="ghost big" data-act="manualOpen">+ Add past session or skip</button>`;
@@ -723,14 +752,6 @@ function daySheet(date){
   ${healthPasteBtn()}
   <button class="ghost big" data-act="manualOpen" data-v="${date}">+ Add entry for this day</button>`;
 }
-function manualSheet(date){
-  return `<h2>Add past entry</h2>
-  <label class="f">Date</label><input type="date" id="mDate" value="${date||iso()}">
-  <label class="f">Workout</label><select id="mType">${WORKOUTS.map(w=>`<option value="${w.key}">${w.label}</option>`).join('')}</select>
-  <label class="f">Status</label><select id="mStatus"><option value="done">Done (no set details)</option><option value="skip">Skip</option></select>
-  <label class="f">Skip reason (if skip)</label><select id="mReason">${SKIP_REASONS.map(r=>`<option>${r}</option>`).join('')}</select>
-  <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="primary big" data-act="manualSave">Add</button></div>`;
-}
 
 /* ================= STATS ================= */
 function rangeStart(){ if(statsRange==='all') return '0000'; return addDays(iso(), statsRange==='4w'?-28:-84); }
@@ -779,7 +800,9 @@ function viewStats(){
   const byEnergy = [1,2,3,4,5].map(n=>{ const d=done.filter(s=>s.pre?.energy===n && sessionVolume(s)>0); return {n, c:d.length, v:avg(d.map(sessionVolume))||0, f:avg(d.map(s=>s.post?.feeling||0))}; }).filter(x=>x.c);
   const names = allExerciseNames(); if(!statsEx || !names.includes(statsEx)) statsEx = names[0]||null;
 
-  return `<h1>Stats</h1><div class="seg">${seg}</div>
+  return `<h1>Stats</h1>
+  <h2 id="month">Month overview</h2>${monthCalendarHtml()}
+  <h2 style="margin-top:18px">Progress & habits</h2><div class="seg">${seg}</div>
   <div class="grid2">
     <div class="stat"><div class="v">${done.length}</div><div class="l">Workouts done</div></div>
     <div class="stat"><div class="v" style="color:${skips.length?'var(--bad)':'inherit'}">${skips.length}</div><div class="l">Skips</div></div>
@@ -1019,8 +1042,14 @@ document.addEventListener('click', ev=>{
     // today
     case 'startOpen': if(S.active){ go('workout'); break; } openModal(startSheet()); break;
     case 'startGo': startWorkout($('#stKey').value, +$('#stAgo').value); break;
-    case 'skipOpen': case 'missSkip': { const tp=todayPlan(); const type = a==='skipOpen' && tp.key && tp.key!=='rest'? keyType(tp.key) : nextPlan().type;
-      skipDraft={type, date:a==='missSkip'? v : iso(), reason:'', instead:'', minutes:'', worth:null, note:''}; openModal(skipSheet()); break; }
+    case 'skipOpen': { const tp=todayPlan(); skipDraft=newDraft(tp.key && tp.key!=='rest'? {type:keyType(tp.key)} : {}); openModal(skipSheet()); break; }
+    case 'missSkip': skipDraft=newDraft({mode:'skip', showMode:true, date:v}); openModal(skipSheet()); break;
+    case 'manualOpen': skipDraft=newDraft({mode:'done', showMode:true, date:v||iso()}); openModal(skipSheet()); break;
+    case 'entMode': readSkipInputs(); skipDraft.mode=v; openModal(skipSheet()); break;
+    case 'entSave': { readSkipInputs(); const w=WORKOUTS.find(x=>x.key===skipDraft.key)||WORKOUTS[0];
+      S.sessions.push({id:uid(), date:skipDraft.date, type:w.type, boulder:w.boulder, status:'done', exercises:[], notes:skipDraft.note});
+      save(); closeModal(); render(); toast(`${w.label} added for ${fmtDate(skipDraft.date)}`);
+      if(S.settings.icloudAuto) saveToICloud(); break; }
     case 'missRest': S.planPins[v]='rest'; save(); closeModal(); render(); break;
     case 'pin': { const d=t.dataset.d; if(v) S.planPins[d]=v; else delete S.planPins[d]; save(); openModal(daySheet(d)); dayOpen=d; render(); break; }
     case 'skReason': readSkipInputs(); skipDraft.reason=v; openModal(skipSheet()); break;
@@ -1074,14 +1103,10 @@ document.addEventListener('click', ev=>{
     case 'healthPaste': pasteHealth(); break;
     // history
     case 'day': dayOpen=v; openModal(daySheet(v)); break;
+    case 'monthView': calMonth = iso().slice(0,7); go('stats'); break;
     case 'calNav': { const [y,m]=calMonth.split('-').map(Number); const d=new Date(y,m-1+(+v),1); calMonth=`${d.getFullYear()}-${pad(d.getMonth()+1)}`; render(); break; }
     case 'histF': histFilter=v; render(); break;
     case 'delSes': if(confirm('Delete this entry?')){ S.sessions=S.sessions.filter(s=>s.id!==t.dataset.id); save(); const d=dayOpen; closeModal(); render(); if(d){ dayOpen=d; openModal(daySheet(d)); } } break;
-    case 'manualOpen': openModal(manualSheet(v)); break;
-    case 'manualSave': { const st=$('#mStatus').value, w=WORKOUTS.find(x=>x.key===$('#mType').value), d=$('#mDate').value||iso();
-      const e={id:uid(), date:d, type:w.type, status:st, boulder:w.boulder, exercises:[]};
-      if(st==='skip') e.skip={reason:$('#mReason').value, instead:'', worth:null, note:''};
-      S.sessions.push(e); save(); closeModal(); render(); break; }
     // stats & settings
     case 'range': statsRange=v; render(); break;
     case 'override': S.settings.nextOverride=v||null; save(); render(); break;
