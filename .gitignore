@@ -1,0 +1,12 @@
+# Never commit personal training data or backups
+*.json
+!package.json
+backups/
+*backup*
+*.local.*
+.env*
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.claude/settings.local.json
