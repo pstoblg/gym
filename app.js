@@ -455,8 +455,7 @@ function render(){
   applyTheme(); renderTabs();
   if(!S.profile.onboarded){ $('#app').innerHTML = viewOnboarding(); renderTimer(); return; }
   if(VIEW==='workout' && !S.active) VIEW='today';
-  const topbar = `<div class="topbar">${window.GymLoader?'<button class="icon ghost" data-act="updCheck" title="Check for updates">⟳</button>':''}<button class="icon ghost" data-act="manual" title="Manual">ⓘ</button></div>`;
-  $('#app').innerHTML = topbar + updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
+  $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
   if (VIEW==='stats') mountCharts();
   renderTimer(); tick();
   if (VIEW==='workout') afterWorkoutRender();
@@ -541,7 +540,7 @@ function calCell(ds, planMap, missing, showMonth){
   return `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${label}</div><div class="st">${cell}</div></div>`;
 }
 const CAL_HEAD = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
-const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:color-mix(in srgb,var(--good) 35%,var(--card2))"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 35%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 35%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span>📌 fixed</span></div>`;
+const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:var(--good-soft)"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 25%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span>📌 fixed</span></div>`;
 function planMapUntil(lastDate){ const n=daysBetween(iso(), lastDate); const m={}; if(n>=0) planDays(n+1).forEach(p=>m[p.date]=p); return m; }
 function greeting(){ const h=new Date().getHours(); return h<11?'Good morning':h<17?'Hi':'Good evening'; }
 function viewToday(){
@@ -792,10 +791,9 @@ function exScreen(){
   const stat = e.skipped? ' · skipped' : past? ` · ${e.sets.filter(x=>x.done&&!x.warm).length}/${e.sets.filter(x=>!x.warm).length} sets${e.left?' · '+fmtClock(e.left-e.arrived):''}` : '';
   const rows=[];
   rows.push(`<li class="exh ${live?'cur':past?(e.skipped?'skp':'past'):'upc'}"><div class="eyebrow">${live?'':past?'Earlier · ':i===nIdx?'Up next · ':'Later · '}Exercise ${i+1} of ${n} · ${esc(e.muscle)}${stat}</div>
-    <div class="exname">${esc(e.name)}</div>${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
-    <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div>
-    ${live && !a.moving? `<div class="acts"><button data-act="exMoveOpen"><span>⇅</span>Move</button><button data-act="exAddOpen"><span>＋</span>Add</button><button class="sk" data-act="exSkipOpen"><span>⤼</span>Skip</button></div>`
-      : !past && !e.skipped? `<div class="acts"><button data-act="exMoveOpen"><span>⇅</span>Move</button><button data-act="exAddOpen"><span>＋</span>Add</button><span></span></div>` : ''}</li>`);
+    <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
+    ${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
+    <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
   if(!live && !past && a.moving && i===nIdx) rows.push(`<li class="mv"><div class="move"><div class="small">On the way here</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div></div></li>`);
   if(e.arrived){ const fs=e.sets.filter(x=>x.start).map(x=>x.start).sort((p,q)=>p-q)[0];
     rows.push(`<li class="ev">Arrived <b>${fmtTime(e.arrived)}</b> · setting up <b ${fs?'':`data-up="${e.arrived}"`}>${fmtClock((fs||Date.now())-e.arrived)}</b></li>`); }
@@ -831,29 +829,26 @@ function edgeInner(dir, ready){
 }
 function viewWorkout(){
   const a=A(); if(!a) return '<div class="empty">No active workout.</div>';
-  const hdr = inSteps()
-    ? `<div class="wohead"><button class="icon ghost" data-act="exPrev" ${a.view===0?'disabled':''} aria-label="Previous exercise">‹</button>
-        <div class="mid"><b class="t-${a.type}">${esc(woLabel(a))}</b> · ${a.view+1} / ${a.exercises.length}<br><span class="clock" id="elapsed">${fmtClock((a.end||Date.now())-a.start)}</span></div>
-        <button class="icon ghost" data-act="exGear" aria-label="Exercise settings">⚙</button></div>`
-    : `<div class="row between"><span class="small muted"><b class="t-${a.type}">${esc(woLabel(a))}</b> · started ${fmtTime(a.start)}</span><span class="pill clock" id="elapsed">${fmtClock((a.end||Date.now())-a.start)}</span></div>`;
-  const head = hdr + stepBar();
+  // same header on every step: left = back, middle = workout + where you are + clock, right = add exercise (during the exercises)
+  const where = inSteps()? `${a.view+1} / ${a.exercises.length}` : a.stage==='steps'? 'Warm-up' : a.stage==='final'? 'Finish' : a.stage==='context'? 'Almost done' : 'Stretching';
+  const left = inSteps()? `<button class="icon" data-act="exPrev" ${a.view===0?'disabled':''} aria-label="Previous exercise">‹</button>`
+    : a.stage!=='steps'? '<button class="icon" data-act="back" aria-label="Back">‹</button>' : '<span></span>';
+  const right = inSteps()? '<button class="icon" data-act="exAddOpen" aria-label="Add exercise">＋</button>' : '<span></span>';
+  const head = `<div class="wohead">${left}<div class="mid"><b class="t-${a.type}">${esc(woLabel(a))}</b> · ${where}<br><span class="clock" id="elapsed">${fmtClock((a.end||Date.now())-a.start)}</span></div>${right}</div>` + stepBar();
   if(a.stage==='stretch') return head + `
-    <div class="card" style="text-align:center"><div class="exname">Will you stretch?</div>
-    <p class="small ink2">Workout ended at ${fmtTime(a.end)} (${fmtDur(a.end-a.start)}).</p>
-    <div class="grid2" style="margin-top:14px"><button class="huge yes" data-act="stretchYes">Yes</button><button class="huge no" data-act="stretchNo">No</button></div></div>
-    <button class="link" data-act="back">◀ Back to the exercises</button>`;
+    <div class="eyebrow">Workout ended ${fmtTime(a.end)} · ${fmtDur(a.end-a.start)}</div>
+    <div class="exname" style="margin:2px 0 14px">Will you stretch?</div>
+    <div class="grid2"><button class="huge yes" data-act="stretchYes">Yes</button><button class="huge no" data-act="stretchNo">No</button></div>`;
   if(a.stage==='stretching') return head + `
-    <div class="card"><div class="small muted">Stretching</div><div class="exname">Stretch</div>
-    <div class="clock" style="font-size:40px;margin:10px 0" id="stepClock">${fmtClock(Date.now()-a.stretch.start)}</div>
-    <button class="primary big" data-act="stretchDone">Done stretching</button>
-    <button class="link" data-act="agoOpen" data-v="stretch">Finished earlier…</button></div>
-    <button class="link" data-act="back">◀ Back</button>`;
+    <div class="eyebrow">After the workout</div><div class="exname" style="margin:2px 0 12px">Stretching</div>
+    <ol class="tl"><li class="run"><div class="set run" style="cursor:default"><div class="n">⏱</div><div class="val">Stretching</div><div class="btns"><span class="runclock" id="stepClock">${fmtClock(Date.now()-a.stretch.start)}</span></div></div></li></ol>
+    <button class="primary big" style="margin-top:16px" data-act="stretchDone">Done stretching</button>
+    <button class="link" data-act="agoOpen" data-v="stretch">Finished earlier…</button>`;
   if(a.stage==='context') return head + `
-    <div class="card"><div class="exname">How was your time today?</div>
-    <p class="small ink2">This helps to see whether time pressure affects your training.</p>
-    <button class="huge" style="margin-top:8px;background:var(--accent-soft)" data-act="ctx" data-v="limited">⏱ Time-limited<br><span class="small ink2">Had plans afterwards, had to hurry</span></button>
-    <button class="huge" style="margin-top:10px;background:var(--accent-soft)" data-act="ctx" data-v="free">🧘 No plans after<br><span class="small ink2">Could take my time</span></button></div>
-    <button class="link" data-act="back">◀ Back</button>`;
+    <div class="eyebrow">One last question</div><div class="exname" style="margin:2px 0 4px">How was your time today?</div>
+    <p class="small ink2" style="margin:0 0 14px">This shows whether time pressure affects your training.</p>
+    <button class="huge soft" data-act="ctx" data-v="limited">⏱ Time-limited<br><span class="small ink2">Had plans afterwards, had to hurry</span></button>
+    <button class="huge soft" style="margin-top:10px" data-act="ctx" data-v="free">🧘 No plans after<br><span class="small ink2">Could take my time</span></button>`;
   if(a.stage==='final'){
     const f=a.post||{}, h=a.health;
     const doneSets = a.exercises.reduce((n,e)=>n+e.sets.filter(s=>s.done&&!s.warm).length,0);
@@ -870,35 +865,39 @@ function viewWorkout(){
       ${h?`<div class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</div>`:`<button class="ghost big" style="margin-bottom:8px" data-act="healthActive">Get Apple Health data</button>${healthPasteBtn()}`}
       </div>
       <button class="primary big" data-act="saveWorkout">Save workout</button>
-      <div class="row between" style="margin-top:6px"><button class="link" data-act="back">◀ Back</button><button class="link" style="color:var(--bad)" data-act="discard">Discard workout</button></div>`;
+      <div class="row between" style="margin-top:6px"><span></span><button class="link" style="color:var(--bad)" data-act="discard">Discard workout</button></div>`;
   }
   if(a.idx<0 && !a.warmup.end){
     const pre=a.pre||{};
-    return head + `<div class="card"><div class="small muted">Before the first exercise</div><div class="exname">Warm-up</div>
-      <div class="clock" id="stepClock" style="font-size:22px;margin:4px 0 8px">${fmtClock(Date.now()-a.warmup.start)}</div>
-      <p class="ink2" style="margin:0 0 4px">${esc(a.warmup.text)||'<span class="muted">No warm-up defined.</span>'}</p>
-      <div class="small muted">Planned: ${a.warmup.minutes||0} min</div></div>
-      <div class="card"><h3>How do you feel?</h3>
-      <label class="f">Energy</label>${scaleHtml('pre','energy',pre.energy,['😵','😕','😐','🙂','💪'])}
-      <label class="f">Soreness (1 = none, 5 = very sore)</label>${scaleHtml('pre','soreness',pre.soreness)}
-      <label class="f">Sleep last night (hours)</label><input inputmode="decimal" data-pre="sleep" value="${esc(pre.sleep||'')}" placeholder="e.g. 7.5"></div>
-      <button class="primary big" data-act="warmupDone">Warm-up done${a.exercises[0]?' → '+esc(a.exercises[0].name):''}</button>
-      <div class="row between"><button class="link" data-act="agoOpen" data-v="step">Finished earlier…</button><button class="link" style="color:var(--bad)" data-act="endEarlyOpen">End workout early…</button></div>`;
+    return head + `<ol class="tl">
+      <li class="exh cur"><div class="eyebrow">Before the first exercise · planned ${a.warmup.minutes||0} min</div><div class="exname">Warm-up</div>
+        ${a.warmup.text?`<div class="exinfo">${esc(a.warmup.text)}</div>`:'<div class="small muted">No warm-up in this template.</div>'}</li>
+      <li class="ev">Started <b>${fmtTime(a.warmup.start)}</b></li>
+      <li class="run"><div class="set run" style="cursor:default"><div class="n">⏱</div><div class="val">Warming up</div><div class="btns"><span class="runclock" id="stepClock">${fmtClock(Date.now()-a.warmup.start)}</span></div></div></li>
+      <li class="div">How do you feel?</li>
+      <li><div class="card" style="margin:0">
+        <label class="f" style="margin-top:0">Energy</label>${scaleHtml('pre','energy',pre.energy,['😵','😕','😐','🙂','💪'])}
+        <label class="f">Soreness (1 = none, 5 = very sore)</label>${scaleHtml('pre','soreness',pre.soreness)}
+        <label class="f">Sleep last night (hours)</label><input inputmode="decimal" data-pre="sleep" value="${esc(pre.sleep||'')}" placeholder="e.g. 7.5"></div></li>
+      </ol>
+      <div class="row between" style="margin-top:10px"><button class="link" data-act="agoOpen" data-v="step">Finished earlier…</button><button class="link" style="color:var(--bad)" data-act="endEarlyOpen">End workout early…</button></div>`;
   }
   return head + exScreen();
 }
 /* bottom bar during the exercises (rendered into #timer, fixed above the tabs) */
 function renderTimer(){
   const box=$('#timer'), a=S.active;
-  const show = a && VIEW==='workout' && S.profile.onboarded && inSteps();
+  const warm = a && a.stage==='steps' && a.idx<0 && !a.warmup.end;
+  const show = a && VIEW==='workout' && S.profile.onboarded && (inSteps() || warm);
   document.body.classList.toggle('hasdock', !!show);
   if(!show){ box.innerHTML=''; return; }
   const nIdx=nextExIdx(), nx=nIdx>=0? a.exercises[nIdx] : null, e=curEx();
   let html;
-  if(a.moving) html = nx? `<button class="big mvb" data-act="arrive">I'm at the machine<span class="sub">${esc(nx.name)}</span></button>` : `<button class="primary big" data-act="arrive">Finish workout</button>`;
+  if(warm) html = `<button class="primary big" data-act="warmupDone">Warm-up done${a.exercises[0]?`<span class="sub">Next: ${esc(a.exercises[0].name)}</span>`:''}</button>`;
+  else if(a.moving) html = nx? `<button class="big mvb" data-act="arrive">I'm at the machine<span class="sub">${esc(nx.name)}</span></button>` : `<button class="primary big" data-act="arrive">Finish workout</button>`;
   else if(a.view!==a.idx) html = `<button class="primary big" data-act="exToCur">Back to current<span class="sub">${esc(e?e.name:'')}</span></button>`;
   else { const none = e && !e.sets.some(x=>x.start||x.end);
-    html = `<button class="big ghost" data-act="exMoveOn">Move on → ${nx?esc(nx.name):'Finish'}</button><div class="note">${none?'Nothing ticked: all sets count, time split evenly':'Sets you haven\'t done won\'t count'}</div>`; }
+    html = `<div class="dockrow"><button class="big danger" data-act="exSkipOpen">⤼ Skip</button><button class="big" data-act="exMoveOn">Move on<span class="sub">${nx?'→ '+esc(nx.name):'Finish'}</span></button></div><div class="note">${none?'Nothing ticked: all sets count, time split evenly':'Sets you haven\'t done won\'t count'}</div>`; }
   box.innerHTML = `<div class="dockbar"><div class="in">${html}</div></div>`;
 }
 let audioCtx = null;
@@ -1496,6 +1495,7 @@ function viewSettings(){
       </ol></details>
   </div>
   <div class="card"><h2>App version</h2>${versionHtml()}</div>
+  <div class="card row between"><div><h2 style="margin:0">Manual</h2><span class="small muted">How everything works, searchable</span></div><button class="soft" data-act="manual">Open</button></div>
   <div class="card"><h2>Data</h2>
     <p class="small ink2">Extra safety: copy all data as text and paste it into a note (Notes app). You can restore it from there the same way.</p>
     <div class="grid2"><button data-act="copyAll">📋 Copy all data</button><button data-act="pasteAll">Restore from clipboard</button></div>
@@ -1546,8 +1546,8 @@ const MANUAL = [
     {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙.'},
     {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
-    {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ top right', text:'Name, info line under the name, warm-up sets, working sets, target and rest. "This workout only" or "Also update template": the current template version is kept and the new one is used from now on. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
-    {id:'mas', title:'Move · Add · Skip', where:'Workout → buttons under the exercise name', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: ticked sets still count, moving starts.'},
+    {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info line under the name, warm-up sets, working sets, target and rest. "This workout only" or "Also update template": the current template version is kept and the new one is used from now on. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
+    {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: ticked sets still count, moving starts.'},
     {id:'earlier', title:'Warm-up finished earlier…', where:'Workout → warm-up', text:'Forgot to tap "Warm-up done"? Pick how many minutes ago. Stretching has the same option.'},
     {id:'endearly', title:'End workout early', where:'Workout → bottom of the exercise', text:'Ends the workout (with "finished X min ago"). The exercise you are at counts with its ticked sets, the remaining ones are marked as skipped.'},
     {id:'stretch', title:'Stretching & time pressure', where:'After the last exercise', text:'Green Yes / red No for stretching (timed if yes). Then: time-limited or no plans after. Both are tracked in Stats.'},
@@ -1576,7 +1576,7 @@ const MANUAL = [
     {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". Calories and heart rate need the Apple Watch. Setup in Settings → Apple Health.'},
   ]},
   {id:'app', title:'⚙️ App & updates', items:[
-    {id:'upd', title:'Updates & ⟳ Refresh', where:'Top right ⟳ · banner "New version available"', text:'The app checks for a new version on every start. When one is found, tap "⟳ Refresh". Your data and a running workout stay. Works offline with the last version.'},
+    {id:'upd', title:'Updates & ⟳ Refresh', where:'Settings → App version · banner "New version available"', text:'The app checks for a new version on every start. When one is found, tap "⟳ Refresh". Your data and a running workout stay. Works offline with the last version.'},
     {id:'rollback', title:'Go back to the previous version', where:'Settings → App version', text:'If a new version misbehaves, go back; updates pause until you resume them.'},
     {id:'templates', title:'Templates & versions', where:'Settings → Workout templates', text:'Read-only list of each workout\'s exercises and all its versions. Templates change only during a workout (⚙ / Add), each change is a new version, and "Use again" brings an older one back as a new version. "Paste a template" turns a copied template text into a new version.'},
     {id:'wizardagain', title:'Welcome wizard again', where:'Settings → Profile', text:'Runs the setup again (name, plan, backup). Your data stays.'},
