@@ -16,7 +16,7 @@ const MUSCLES = ['Chest','Shoulders','Triceps','Back','Biceps','Forearms / Grip'
 const SKIP_REASONS = ['No time','Work','Tired','Sick','Alcohol','Social','Pain / injury','Motivation','Other'];
 const AGO = [1,2,3,5,10,15,20,30,45,60];
 
-const ex = (name, kind, sets, target, rest, muscle) => ({name, kind, sets, target, rest, muscle});
+const ex = (name, kind, sets, target, rest, muscle) => ({name, kind, sets, target, rest, muscle, info:'', warm: kind==='w'? 1 : 0});
 const DEFAULT_TEMPLATES = {
   Push: { warmup:{text:'5 min light cardio, arm circles, band pull-aparts, 2×10 push-ups, 2 light sets of the first exercise', minutes:10}, exercises:[
     ex('Bench Press','w',4,'6-10',180,'Chest'),
@@ -61,7 +61,7 @@ function num(v){ const n=parseFloat(String(v??'').replace(',','.')); return isFi
 function localToday(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function defaultState(){
   return {
-    v:4,
+    v:5,
     profile:{ name:'', onboarded:false, obStep:0 },
     settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(), maxInRow:0,
       defaultRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
@@ -76,7 +76,7 @@ function load(){
   for(const k of [KEY, LEGACY_KEY]){
     try{ const s = JSON.parse(localStorage.getItem(k)); if(s && s.v) return migrate(s); }catch(e){}
   }
-  return defaultState();
+  return migrate(defaultState()); // fills in template versions for a fresh install
 }
 function migrate(s){
   const d = defaultState();
@@ -116,8 +116,26 @@ function migrate(s){
     t.exercises.forEach(e=>{ if(e.info==null) e.info=''; if(e.warm==null) e.warm=0; });
     if(!(s.tplHistory[k]||[]).length) s.tplHistory[k] = [{v:t.v, at:Date.now(), note:'Version before changes were tracked', tpl:JSON.parse(JSON.stringify(t))}];
   }
-  s.v = 4;
+  if(s.v < 5){
+    // every weight exercise gets one warm-up set by default; saved as a new template version so the old one stays
+    for(const k of Object.keys(s.templates)){
+      const t=s.templates[k];
+      if(!t.exercises.some(e=>e.kind==='w' && !(e.warm>0))) continue;
+      const n=JSON.parse(JSON.stringify(t)); n.exercises.forEach(e=>{ if(e.kind==='w' && !(e.warm>0)) e.warm=1; }); n.v=t.v+1;
+      s.tplHistory[k].push({v:n.v, at:Date.now(), note:'One warm-up set added to each weight exercise', tpl:JSON.parse(JSON.stringify(n))});
+      s.templates[k]=n;
+    }
+  }
+  s.v = 5;
   return s;
+}
+// Warm-up weight: 30–50 % of the working weight, picked so the difference stacks with big plates
+// (100 → 50, 80 → 40, 22.5 → 10, 17.5 → 7.5). The largest such value wins; coarser steps are tried first.
+function warmWeight(w){
+  w=num(w); if(w<=0) return 0;
+  let best=0;
+  for(const st of [25,20,10,5,2.5]){ const c=Math.floor(w*0.5/st)*st; if(c>=w*0.3 && c>best) best=c; }
+  return best || Math.round(w*0.4*4)/4;
 }
 // Saves a new template version. The previous one stays in tplHistory, so nothing is ever overwritten.
 function tplChange(key, note, fn){
@@ -213,7 +231,7 @@ async function tplPaste(){
     if(!Array.isArray(list) || !list.length || !list.every(e=>e && e.name)) throw new Error('no "exercises" list with names found');
     const exs = list.map(e=>({ name:String(e.name).trim(), info:String(e.info||''), kind: KINDS[e.kind]? e.kind : 'w',
       sets:Math.max(1, parseInt(e.sets)||3), target:String(e.target||'8-12'), rest: e.rest!=null && e.rest!==''? Math.max(0, parseInt(e.rest)||0) : S.settings.defaultRest,
-      muscle: MUSCLES.includes(e.muscle)? e.muscle : defaultMuscle(e.name), warm:Math.max(0, parseInt(e.warm)||0), w: num(e.w)||0 }));
+      muscle: MUSCLES.includes(e.muscle)? e.muscle : defaultMuscle(e.name), warm: e.warm!=null && e.warm!==''? Math.max(0, parseInt(e.warm)||0) : (KINDS[e.kind]&&e.kind!=='w'? 0 : 1), w: num(e.w)||0 }));
     const cur = S.templates[tplEdit];
     if(!confirm(`Make this the new ${keyLabel(tplEdit)} template (${exs.length} exercises)? v${cur.v||1} stays in the version list.`)) return;
     tplChange(tplEdit, 'Pasted', t=>{ t.exercises=exs; if(d.warmup && d.warmup.text!=null) t.warmup={text:String(d.warmup.text), minutes:parseInt(d.warmup.minutes)||0}; });
@@ -447,14 +465,18 @@ const ICONS = {
   settings:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
 };
 function renderTabs(){
-  if(!S.profile.onboarded){ $('#tabs').innerHTML=''; return; }
+  // no navigation while a workout runs: the workout is the only screen until it is saved or discarded
+  const off = !S.profile.onboarded || !!S.active;
+  document.body.classList.toggle('notabs', off);
+  if(off){ $('#tabs').innerHTML=''; return; }
   const tabs = [['today','Today'],...(S.active?[['workout','Workout']]:[]),['history','History'],['stats','Stats'],['settings','Settings']];
   $('#tabs').innerHTML = tabs.map(([k,l])=>`<button data-act="tab" data-v="${k}" class="${VIEW===k?'on':''}">${ICONS[k]}${l}</button>`).join('');
 }
 function render(){
+  if(S.active) VIEW='workout';
+  else if(VIEW==='workout') VIEW='today';
   applyTheme(); renderTabs();
   if(!S.profile.onboarded){ $('#app').innerHTML = viewOnboarding(); renderTimer(); return; }
-  if(VIEW==='workout' && !S.active) VIEW='today';
   $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
   if (VIEW==='stats') mountCharts();
   renderTimer(); tick();
@@ -622,7 +644,7 @@ function buildExercise(t){
   const work = Array.from({length:Math.max(1, t.sets|0)}, (_,i)=>{ const p=prev[i]||prev[prev.length-1];
     return newSet(hasWeight(t)? (p? num(p.w) : baseW) : '', p? p.r : r0, false); });
   const warm = Array.from({length:Math.max(0, t.warm|0)}, (_,i)=>{ const p=pw[i]||pw[pw.length-1];
-    return newSet(hasWeight(t)? (p? num(p.w) : Math.round(baseW*0.5/2.5)*2.5) : '', p? p.r : r0, true); });
+    return newSet(t.kind==='w'? warmWeight(work[0]? work[0].w : baseW) : hasWeight(t)? (p? num(p.w) : baseW) : '', p? p.r : r0, true); });
   return {name:t.name, tplName:t.name, kind:t.kind, muscle:t.muscle||defaultMuscle(t.name), info:t.info||'', target:t.target,
     rest: t.rest!=null && t.rest!=='' ? +t.rest : S.settings.defaultRest, sets:[...warm, ...work], arrived:null, left:null, skipped:false};
 }
@@ -736,7 +758,7 @@ function gearSave(toTpl){
   const name=g('gName').trim()||e.name, info=g('gInfo').trim(), target=g('gTarget').trim()||e.target;
   const rest=Math.max(0, parseInt(g('gRest'))||0), nw=Math.max(0, parseInt(g('gWarm'))||0), ns=Math.max(1, parseInt(g('gSets'))||1);
   const warm=e.sets.filter(x=>x.warm), work=e.sets.filter(x=>!x.warm);
-  const fit=(arr, n, isWarm)=>{ arr=arr.slice(0,n); while(arr.length<n){ const l=arr[arr.length-1] || (isWarm? {w:hasWeight(e)? Math.round(num((work[0]||{}).w)*0.5/2.5)*2.5 : '', r:(work[0]||{}).r} : work[work.length-1]) || {w:'', r:parseInt(target)||''};
+  const fit=(arr, n, isWarm)=>{ arr=arr.slice(0,n); while(arr.length<n){ const l=arr[arr.length-1] || (isWarm? {w:e.kind==='w'? warmWeight((work[0]||{}).w) : hasWeight(e)? num((work[0]||{}).w) : '', r:(work[0]||{}).r} : work[work.length-1]) || {w:'', r:parseInt(target)||''};
     arr.push(newSet(l.w, l.r, isWarm)); } return arr; };
   const oldTpl=e.tplName;
   Object.assign(e, {name, info, target, rest, sets:[...fit(warm,nw,true), ...fit(work,ns,false)]});
@@ -747,6 +769,21 @@ function gearSave(toTpl){
     e.tplName=name;
     toast(`${keyLabel(a.key)} v${S.templates[a.key].v} is in use now. v${S.templates[a.key].v-1} is kept in Settings.`);
   } else toast('Changed for this workout only');
+}
+
+// Warm-up sets follow the weight of the first working set until they are done (weight exercises only)
+function syncWarm(e, si){
+  const x=e.sets[si]; if(e.kind!=='w' || x.warm || e.sets.find(y=>!y.warm)!==x) return false;
+  let ch=false; e.sets.forEach(y=>{ if(y.warm && !y.end){ y.w=warmWeight(x.w); ch=true; } }); return ch;
+}
+function wuGearSheet(){
+  const a=A(), v=S.templates[a.key].v||1;
+  return `<h2>⚙ Warm-up</h2>
+  <label class="f">What you do (shown under the title)</label><textarea id="wuText" placeholder="e.g. 5 min rowing, band pull-aparts">${esc(a.warmup.text)}</textarea>
+  <label class="f">Planned minutes</label><input id="wuMin" inputmode="numeric" value="${a.warmup.minutes||0}">
+  <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b> keeps ${esc(keyLabel(a.key))} v${v} in Settings and puts v${v+1} in use right away.</span></div>
+  <div class="grid2" style="margin-top:10px"><button class="big" data-act="wuSave" data-v="once">This workout only</button><button class="primary big" data-act="wuSave" data-v="tpl">Also update template</button></div>
+  <button class="big" style="margin-top:8px;background:transparent;border:0" data-act="closeModal">Cancel</button>`;
 }
 
 /* ---- workout screens ---- */
@@ -870,10 +907,11 @@ function viewWorkout(){
   if(a.idx<0 && !a.warmup.end){
     const pre=a.pre||{};
     return head + `<ol class="tl">
-      <li class="exh cur"><div class="eyebrow">Before the first exercise · planned ${a.warmup.minutes||0} min</div><div class="exname">Warm-up</div>
-        ${a.warmup.text?`<div class="exinfo">${esc(a.warmup.text)}</div>`:'<div class="small muted">No warm-up in this template.</div>'}</li>
-      <li class="ev">Started <b>${fmtTime(a.warmup.start)}</b></li>
-      <li class="run"><div class="set run" style="cursor:default"><div class="n">⏱</div><div class="val">Warming up</div><div class="btns"><span class="runclock" id="stepClock">${fmtClock(Date.now()-a.warmup.start)}</span></div></div></li>
+      <li class="exh cur"><div class="eyebrow">Before the first exercise · ${esc(a.type)}</div>
+        <div class="titlerow"><div class="exname">Warm-up</div><div class="tbtns"><button class="icon" data-act="wuGear" aria-label="Warm-up settings">⚙</button></div></div>
+        ${a.warmup.text?`<div class="exinfo">${esc(a.warmup.text)}</div>`:'<div class="small muted">No warm-up written down yet. Add it with ⚙.</div>'}
+        <div class="small muted" style="margin-top:3px">Planned ${a.warmup.minutes||0} min</div></li>
+      <li class="ev">Started <b>${fmtTime(a.warmup.start)}</b> · warming up <b data-up="${a.warmup.start}">${fmtClock(Date.now()-a.warmup.start)}</b></li>
       <li class="div">How do you feel?</li>
       <li><div class="card" style="margin:0">
         <label class="f" style="margin-top:0">Energy</label>${scaleHtml('pre','energy',pre.energy,['😵','😕','😐','🙂','💪'])}
@@ -1544,6 +1582,8 @@ const MANUAL = [
     {id:'startwo', title:'Start a workout', where:'Today → Start workout', text:'Choose what you train (planned one is preselected) and when you started (now or X min ago).'},
     {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'Warm-up first, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. ‹ top left goes back in one tap. "Back to current" returns to where you are.'},
     {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it.'},
+    {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
+    {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙.'},
     {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
     {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info line under the name, warm-up sets, working sets, target and rest. "This workout only" or "Also update template": the current template version is kept and the new one is used from now on. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
@@ -1667,6 +1707,7 @@ document.addEventListener('click', ev=>{
       s[k] = k==='w'? nv : String(nv);
       // carry the change to the following sets of the same kind (warm-up / working) that had the same value and aren't done yet
       e.sets.slice(si+1).forEach(x=>{ if(!x.end && x.warm===s.warm && num(x[k])===old) x[k]=s[k]; });
+      if(k==='w') syncWarm(e, si);
       woFocus=si; save(); render(); break; }
     case 'setFocus': { if(ev.target.closest('input,.edit')) break; const si=+t.dataset.s; woFocus = woFocus===si? -1 : si; render(); break; }
     case 'setStart': startSet(+t.dataset.s); save(); render(); break;
@@ -1678,6 +1719,11 @@ document.addEventListener('click', ev=>{
     case 'exNext': exSwitch('down'); break;
     case 'exToCur': W.view=Math.max(0,W.idx); woAnim='down'; woScroll='top'; woFocus=null; save(false); render(); break;
     case 'exGear': openModal(exGearSheet()); break;
+    case 'wuGear': openModal(wuGearSheet()); break;
+    case 'wuSave': { const text=$('#wuText').value.trim(), minutes=Math.max(0,parseInt($('#wuMin').value)||0);
+      Object.assign(W.warmup, {text, minutes});
+      if(v==='tpl'){ tplChange(W.key, 'Changed warm-up', tp=>{ tp.warmup={text, minutes}; }); toast(`${keyLabel(W.key)} v${S.templates[W.key].v} is in use now`); } else toast('Changed for this workout only');
+      save(); closeModal(); render(); break; }
     case 'gearSave': gearSave(v==='tpl'); save(); closeModal(); render(); break;
     case 'gearRemove': { const e=viewEx(); if(confirm(`Remove “${e.tplName}” from the ${keyLabel(W.key)} template? This saves a new version; the old one stays in Settings. It stays in today's workout.`)){
       tplChange(W.key, `Removed “${e.tplName}”`, tp=>{ tp.exercises=tp.exercises.filter(x=>x.name!==e.tplName); }); save(); closeModal(); render(); toast(`${keyLabel(W.key)} v${S.templates[W.key].v} is in use now`); } break; }
@@ -1687,7 +1733,7 @@ document.addEventListener('click', ev=>{
     case 'exDoNext': exDoNext(+t.dataset.i); save(); closeModal(); woScroll='top'; render(); break;
     case 'exAddOpen': openModal(exAddSheet()); break;
     case 'exAdd': { const g=id=>$('#'+id).value.trim(); const name=g('aName'); if(!name){ toast('Enter a name'); break; }
-      const tpl={name, info:g('aInfo'), kind:g('aKind'), muscle:g('aMuscle'), sets:Math.max(1,parseInt(g('aSets'))||3), target:g('aR')||'10', rest:Math.max(0,parseInt(g('aRest'))||0), warm:0, w:num(g('aW'))};
+      const tpl={name, info:g('aInfo'), kind:g('aKind'), muscle:g('aMuscle'), sets:Math.max(1,parseInt(g('aSets'))||3), target:g('aR')||'10', rest:Math.max(0,parseInt(g('aRest'))||0), warm:g('aKind')==='w'? 1 : 0, w:num(g('aW'))};
       exAddOne(tpl, v==='tpl'); save(); closeModal(); render(); toast(v==='tpl'? `Added. ${keyLabel(W.key)} v${S.templates[W.key].v} is in use now.` : 'Added after the current exercise'); break; }
     case 'exSkipOpen': openModal(exSkipSheet()); break;
     case 'exSkip': leaveExercise(Date.now(), true); save(); closeModal(); render(); break;
@@ -1755,6 +1801,7 @@ document.addEventListener('input', ev=>{
   if(t.dataset.in && W){ const e=viewEx(), si=+t.dataset.s, k=t.dataset.in, old=e.sets[si][k];
     e.sets[si][k]=t.value;
     e.sets.slice(si+1).forEach((x,j)=>{ if(!x.end && x.warm===e.sets[si].warm && String(x[k])===String(old)){ x[k]=t.value; const inp=document.querySelector(`[data-in="${k}"][data-s="${si+1+j}"]`); if(inp) inp.value=t.value; } });
+    if(k==='w' && syncWarm(e, si)) e.sets.forEach((x,j)=>{ if(x.warm){ const el=document.querySelector(`.set[data-s="${j}"] .val`); if(el) el.innerHTML=setVal(e,x); } });
     save(); }
   else if(t.dataset.pre && W){ W.pre=W.pre||{}; W.pre[t.dataset.pre]=t.value; save(); }
   else if(t.dataset.post && W){ W.post=W.post||{}; W.post[t.dataset.post]=t.value; save(); }

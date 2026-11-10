@@ -256,6 +256,9 @@ button.huge.soft{color:var(--ink)}
 .dockbar .mvb{background:var(--move);color:#fff;font-weight:700}
 .dockbar .note{font-size:11px;color:var(--muted);text-align:center;margin-top:4px}
 body.hasdock{padding-bottom:calc(160px + env(safe-area-inset-bottom))}
+body.notabs{padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+body.notabs.hasdock{padding-bottom:calc(120px + env(safe-area-inset-bottom))}
+body.notabs .dockbar{bottom:0;padding-bottom:calc(10px + env(safe-area-inset-bottom))}
 .strip{display:flex;height:26px;border-radius:7px;overflow:hidden;font-size:10px;font-weight:700;color:#fff;margin-top:8px}
 .strip div{display:grid;place-items:center;min-width:0;white-space:nowrap;overflow:hidden}
 .k-mv{background:var(--move)} .k-ar{background:var(--muted)} .k-st{background:var(--accent)} .k-rs{background:var(--rest)} .k-wu{background:var(--pull)}
