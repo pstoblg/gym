@@ -1096,11 +1096,33 @@ function ptrRefresh(){
   S=load(); render(); if(!window.GymLoader) toast('Refreshed');
   if(window.GymLoader) GymLoader.checkNow(true);
 }
+/* sheets: drag down (from the top of their content) to close; the page behind never scrolls */
+let sh=null;
+function innerScroll(el, sheet){ // a scrollable box inside the sheet (textarea, wide list) that can still scroll up
+  for(; el && el!==sheet; el=el.parentElement){ if(el.scrollTop>0 && el.scrollHeight>el.clientHeight) return true; }
+  return false;
+}
+function sheetEnd(){
+  if(!sh) return; const p=sh; sh=null; if(!p.on) return;
+  const el=p.sheet, dt=Math.max(1,Date.now()-p.t), fast=p.d>40 && p.d/dt>0.5;
+  el.style.transition='transform .2s ease-out';
+  if(p.d>110 || fast){ el.style.transform='translateY(100%)'; setTimeout(()=>{ if($('#modal .sheet')===el) closeModal(); }, 190); }
+  else { el.style.transform=''; setTimeout(()=>{ el.style.transition=''; }, 210); }
+}
 document.addEventListener('touchstart',ev=>{
+  const sheet=$('#modal .sheet');
+  sh = sheet? {y:ev.touches[0].clientY, x:ev.touches[0].clientX, sheet, d:0, on:false, t:Date.now(), tgt:ev.target} : null;
   woPull = gestureOn()? {y:ev.touches[0].clientY, d:0, dir:null} : null;
   ptr = ptrOn() && atTop()? {y:ev.touches[0].clientY, d:0} : null;
 },{passive:true});
 document.addEventListener('touchmove',ev=>{
+  if(sh){ const el=sh.sheet, dy=ev.touches[0].clientY-sh.y, dx=ev.touches[0].clientX-sh.x;
+    if(!sh.on && dy>6 && Math.abs(dy)>Math.abs(dx) && el.scrollTop<=0 && el.contains(sh.tgt) && !innerScroll(sh.tgt, el)){ sh.on=true; sh.y=ev.touches[0].clientY; sh.t=Date.now(); }
+    if(sh.on){ ev.preventDefault(); sh.d=Math.max(0, ev.touches[0].clientY-sh.y); el.style.transition='none'; el.style.transform=`translateY(${sh.d}px)`; return; }
+    // keep the page behind still: backdrop, or a sheet that has nothing to scroll in that direction
+    const canScroll = el.contains(sh.tgt) && el.scrollHeight>el.clientHeight && (dy<0 ? el.scrollTop+el.clientHeight<el.scrollHeight : el.scrollTop>0);
+    if(!canScroll && !innerScroll(sh.tgt, el) && Math.abs(dy)>=Math.abs(dx)) ev.preventDefault();
+    return; }
   if(ptr){ const dy=ev.touches[0].clientY-ptr.y;
     if(dy>0 && atTop()){ ev.preventDefault(); ptr.d=dy*0.5; ptrShow(ptr.d); } else if(ptr.d){ ptr.d=0; ptrShow(0); } }
   if(!woPull) return; const dy=ev.touches[0].clientY-woPull.y;
@@ -1111,6 +1133,7 @@ document.addEventListener('touchmove',ev=>{
   woPull.d=Math.abs(dy)*0.5; updateEdges({dir, d:woPull.d});
 },{passive:false});
 document.addEventListener('touchend',()=>{
+  sheetEnd();
   if(ptr){ const p=ptr; ptr=null; ptrShow(0); if(p.d>=PULL_AT) ptrRefresh(); }
   if(!woPull) return; const p=woPull; woPull=null; if(!p.dir) return; updateEdges(); if(p.d>=PULL_AT) edgeGesture(p.dir); });
 document.addEventListener('wheel',ev=>{
@@ -1838,7 +1861,7 @@ function openManual(focus){
 
 /* ================= modal ================= */
 function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; growAll($('#modal')); }
-function closeModal(){ if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); $('#modal').innerHTML=''; dayOpen=null; woPull=null; }
+function closeModal(){ if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); $('#modal').innerHTML=''; dayOpen=null; woPull=null; sh=null; }
 
 /* ================= events ================= */
 document.addEventListener('click', ev=>{
@@ -2046,7 +2069,7 @@ async function exportData(){
 }
 // Coming back from the Shortcuts app: reload state from storage and refresh (unless a sheet is open)
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else tick(); } wakeSync(); });
-document.addEventListener('touchcancel',()=>{ woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
+document.addEventListener('touchcancel',()=>{ if(sh){ sh.d=0; sheetEnd(); } woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
 
 render();
 window.__gymBooted = true; // tells the loader this version started fine
