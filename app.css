@@ -252,7 +252,7 @@ mark{background:color-mix(in srgb,var(--warn) 40%,transparent);color:inherit;bor
 .titlerow .exname{min-width:0}
 .tbtns{display:flex;gap:6px;flex:none;margin-top:2px}
 button.huge.soft{color:var(--ink)}
-.dockbar .sub{display:block;font-size:12px;font-weight:500;opacity:.85}
+.dockbar .sub,button.big .sub{display:block;font-size:12px;font-weight:500;opacity:.85}
 .dockbar .mvb{background:var(--move);color:#fff;font-weight:700}
 .dockbar .note{font-size:11px;color:var(--muted);text-align:center;margin-top:4px}
 body.hasdock{padding-bottom:calc(160px + env(safe-area-inset-bottom))}

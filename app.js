@@ -301,7 +301,7 @@ function applyHealth(txt){
   const tgt = S.healthPending && S.healthPending.target;
   if(tgt==='active' && S.active) S.active.health = h;
   else { const s=S.sessions.find(x=>x.id===tgt); if(!s) throw new Error('no workout is waiting for health data'); s.health=h; }
-  S.healthPending = null; save(); closeModal(); render(); toast(`Health data added: ${h.steps} steps, ${h.kcal} kcal`);
+  const d=dayOpen; S.healthPending = null; save(); closeModal(); render(); if(d){ dayOpen=d; openModal(daySheet(d)); } toast(`Health data added: ${h.steps} steps, ${h.kcal} kcal`);
 }
 async function pasteHealth(){
   let txt='';
@@ -702,7 +702,7 @@ const woLabel = w => w.type + (w.boulder?' + Bouldering':'');
 /* ================= WORKOUT =================
    Active workout: {id,key,tplV,date,type,boulder,start,end,idx,view,moving,stage,warmup,exercises,pre,post,notes,stretch,context,health,lastSnap,restBeep}
    idx = exercise you are at (-1 = warm-up / on the way to the first one), view = exercise on screen (one per screen).
-   stage: steps → stretch → stretching → context → final.
+   stage: checkin (energy, motivation, soreness, sleep) → steps → stretch → stretching → context → final.
    Time model (only timestamps are stored, so reloads, updates and offline change nothing):
      moving  = left previous exercise → "I'm at the machine" (exercise.arrived)
      setup   = arrived → first set start
@@ -727,7 +727,7 @@ function buildExercise(t){
 function startWorkout(key, agoMin){
   const w = WORKOUTS.find(x=>x.key===key); const tpl = S.templates[key];
   const start = Date.now() - (agoMin||0)*60000;
-  S.active = { id:uid(), key, tplV:tpl.v||1, date:iso(new Date(start)), type:w.type, boulder:w.boulder, start, end:null, idx:-1, view:0, moving:null, stage:'steps',
+  S.active = { id:uid(), key, tplV:tpl.v||1, date:iso(new Date(start)), type:w.type, boulder:w.boulder, start, end:null, idx:-1, view:0, moving:null, stage:'checkin', ago:agoMin||0, prevOverride:S.settings.nextOverride||null,
     warmup:{text:tpl.warmup.text, minutes:tpl.warmup.minutes, start, end:null},
     exercises: tpl.exercises.map(buildExercise), pre:{}, post:{}, notes:'', stretch:null, context:null, health:null, lastSnap:start, restBeep:null };
   S.settings.nextOverride = null;
@@ -791,6 +791,13 @@ function arrive(){
   a.idx=n; a.view=n; a.exercises[n].arrived=Date.now(); a.moving=null; woFocus=null;
   save(); woScroll='top'; woAnim='down'; render();
 }
+// questions answered → the workout (and its warm-up) starts now, unless it was started "… min ago"
+function checkinDone(){
+  const a=A(), now=Date.now();
+  if(!a.ago){ a.start=now; a.warmup.start=now; a.lastSnap=now; a.date=iso(); }
+  a.stage='steps'; save(); window.scrollTo(0,0); render();
+}
+const woMuscles = a => [...new Set(a.exercises.map(e=>e.muscle).filter(Boolean))];
 function finishSteps(){ const a=A(); a.end = a.moving || Date.now(); a.stage='stretch'; save(); closeModal(); window.scrollTo(0,0); render(); }
 function endEarly(endTs){
   const a=A(); endTs=Math.min(Date.now(), endTs);
@@ -803,6 +810,7 @@ function endEarly(endTs){
 function goBack(){
   const a=A();
   if(a.stage==='final'){ a.stage='context'; }
+  else if(a.stage==='steps' && a.idx<0 && !a.warmup.end){ a.stage='checkin'; }
   else if(a.stage==='context'){ if(a.stretch && a.stretch.did){ a.stage='stretching'; a.stretch.end=null; } else { a.stage='stretch'; a.stretch=null; } }
   else if(a.stage==='stretching'){ a.stage='stretch'; a.stretch=null; }
   else if(a.stage==='stretch'){ a.stage='steps'; a.end=null; if(!a.exercises.length){ a.warmup.end=null; a.moving=null; } }
@@ -865,7 +873,7 @@ function wuGearSheet(){
 /* ---- workout screens ---- */
 let woFocus=null, woScroll=null, woAnim=null, woArmed=null, woArmT=0;
 function stepBar(){
-  const a=A(), fin=a.stage!=='steps';
+  const a=A(), fin=a.stage!=='steps' && a.stage!=='checkin';
   const segs=[`<i class="${a.warmup.end||fin?'done':'cur'}"></i>`];
   a.exercises.forEach((e,i)=>segs.push(`<i class="${e.skipped&&(e.left||fin)?'skip':e.left||fin&&e.arrived?'done':i===a.idx?'cur':''}${inSteps()&&i===a.view&&a.view!==a.idx?' view':''}"></i>`));
   segs.push(`<i class="${a.stage==='final'?'cur':''}"></i>`);
@@ -962,11 +970,23 @@ function edgeInner(dir, ready){
 function viewWorkout(){
   const a=A(); if(!a) return '<div class="empty">No active workout.</div>';
   // same header on every step: left = back, middle = workout + where you are + clock, right = add exercise (during the exercises)
-  const where = inSteps()? `${a.view+1} / ${a.exercises.length}` : a.stage==='steps'? 'Warm-up' : a.stage==='final'? 'Finish' : a.stage==='context'? 'Almost done' : 'Stretching';
+  const where = inSteps()? `${a.view+1} / ${a.exercises.length}` : a.stage==='checkin'? 'Check-in' : a.stage==='steps'? 'Warm-up' : a.stage==='final'? 'Finish' : a.stage==='context'? 'Almost done' : 'Stretching';
   const left = inSteps()? `<button class="icon" data-act="exPrev" ${a.view===0?'disabled':''} aria-label="Previous exercise">‹</button>`
-    : a.stage!=='steps'? '<button class="icon" data-act="back" aria-label="Back">‹</button>' : '<span></span>';
+    : a.stage!=='checkin'? '<button class="icon" data-act="back" aria-label="Back">‹</button>' : '<span></span>';
   const right = inSteps()? '<button class="icon" data-act="exAddOpen" aria-label="Add exercise">＋</button>' : '<span></span>';
   const head = `<div class="wohead">${left}<div class="mid"><b class="t-${a.type}">${esc(woLabel(a))}</b> · ${where}<br><span class="clock" id="elapsed">${fmtClock((a.end||Date.now())-a.start)}</span></div>${right}</div>` + stepBar();
+  if(a.stage==='checkin'){
+    const pre=a.pre||{}, mus=woMuscles(a);
+    return head + `<div class="eyebrow">Before you start</div><div class="exname" style="margin:2px 0 12px">How do you feel?</div>
+    <div class="card">
+      <label class="f" style="margin-top:0">Energy</label>${scaleHtml('pre','energy',pre.energy,['😵','😕','😐','🙂','💪'])}
+      <label class="f">Motivation</label>${scaleHtml('pre','motivation',pre.motivation,['🛌','😒','😐','😃','🚀'])}
+      <label class="f">Soreness in your ${esc(a.type)} muscles (1 = none, 5 = very sore)</label>
+      ${mus.length?`<div class="small muted" style="margin:-2px 0 6px">${mus.map(esc).join(' · ')}</div>`:''}${scaleHtml('pre','soreness',pre.soreness)}
+      <label class="f">Sleep last night (hours)</label><input inputmode="decimal" data-pre="sleep" value="${esc(pre.sleep||'')}" placeholder="e.g. 7.5"></div>
+    <button class="primary big" data-act="checkinDone">Start workout<span class="sub">Warm-up next</span></button>
+    <div class="row between" style="margin-top:6px"><button class="link" data-act="checkinDone">Skip questions</button><button class="link" style="color:var(--bad)" data-act="checkinCancel">Cancel workout</button></div>`;
+  }
   if(a.stage==='stretch') return head + `
     <div class="eyebrow">Workout ended ${fmtTime(a.end)} · ${fmtDur(a.end-a.start)}</div>
     <div class="exname" style="margin:2px 0 14px">Will you stretch?</div>
@@ -1000,18 +1020,12 @@ function viewWorkout(){
       <div class="row between" style="margin-top:6px"><span></span><button class="link" style="color:var(--bad)" data-act="discard">Discard workout</button></div>`;
   }
   if(a.idx<0 && !a.warmup.end){
-    const pre=a.pre||{};
     return head + `<ol class="tl">
       <li class="exh cur"><div class="eyebrow">Before the first exercise · ${esc(a.type)}</div>
         <div class="titlerow"><div class="exname">Warm-up</div><div class="tbtns"><button class="icon" data-act="wuGear" aria-label="Warm-up settings">⚙</button></div></div>
         ${a.warmup.text?`<div class="exinfo">${esc(a.warmup.text)}</div>`:'<div class="small muted">No warm-up written down yet. Add it with ⚙.</div>'}
         <div class="small muted" style="margin-top:3px">Planned ${a.warmup.minutes||0} min</div></li>
       <li class="ev">Started <b>${fmtTime(a.warmup.start)}</b> · warming up <b data-up="${a.warmup.start}">${fmtClock(Date.now()-a.warmup.start)}</b></li>
-      <li class="div">How do you feel?</li>
-      <li><div class="card" style="margin:0">
-        <label class="f" style="margin-top:0">Energy</label>${scaleHtml('pre','energy',pre.energy,['😵','😕','😐','🙂','💪'])}
-        <label class="f">Soreness (1 = none, 5 = very sore)</label>${scaleHtml('pre','soreness',pre.soreness)}
-        <label class="f">Sleep last night (hours)</label><input inputmode="decimal" data-pre="sleep" value="${esc(pre.sleep||'')}" placeholder="e.g. 7.5"></div></li>
       </ol>
       <div class="row between" style="margin-top:10px"><button class="link" data-act="agoOpen" data-v="step">Finished earlier…</button><button class="link" style="color:var(--bad)" data-act="endEarlyOpen">End workout early…</button></div>`;
   }
@@ -1366,7 +1380,7 @@ function sessionDetail(s){
   const p=s.pre||{}, q=s.post||{}, h=s.health;
   if(s.activity) return `<div class="card"><h2>${esc(s.activity)} <span class="pill">activity</span></h2>
     <div class="small ink2">${s.start&&s.end?`${fmtTime(s.start)}–${fmtTime(s.end)} · ${fmtDur(s.end-s.start)}`:'No time given'}</div>
-    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : (s.start&&s.end? `<button class="ghost big" style="margin-top:8px" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>`:'')}
+    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : sesHealthBtns(s)}
     <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete activity</button></div>`;
   const exs = (s.exercises||[]).some(e=>e.arrived)? recordTimeline(s) : (s.exercises||[]).map(e=>{
     const prev = prevOccurrence(e.name, s);
@@ -1386,10 +1400,17 @@ function sessionDetail(s){
       ${s.warmup&&s.warmup.start&&s.warmup.end? `<span class="pill">warm-up ${fmtDur(s.warmup.end-s.warmup.start)}</span>`:''}
     </div>
     ${exs}
-    <table class="tbl" style="margin-top:8px"><tr><td>Energy before</td><td>${p.energy||'—'}</td><td>Feeling</td><td>${q.feeling||'—'}</td></tr><tr><td>Soreness</td><td>${p.soreness||'—'}</td><td>RPE</td><td>${q.rpe||'—'}</td></tr><tr><td>Sleep</td><td>${p.sleep||'—'}</td><td>Power</td><td>${q.power||'—'}</td></tr></table>
-    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : (s.start&&s.end? `<button class="ghost big" style="margin-top:8px" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>`:'')}
+    <table class="tbl" style="margin-top:8px"><tr><td>Energy before</td><td>${p.energy||'—'}</td><td>Feeling</td><td>${q.feeling||'—'}</td></tr><tr><td>Motivation</td><td>${p.motivation||'—'}</td><td></td><td></td></tr><tr><td>Soreness</td><td>${p.soreness||'—'}</td><td>RPE</td><td>${q.rpe||'—'}</td></tr><tr><td>Sleep</td><td>${p.sleep||'—'}</td><td>Power</td><td>${q.power||'—'}</td></tr></table>
+    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : sesHealthBtns(s)}
     ${s.notes?`<p class="small">${esc(s.notes)}</p>`:''}
     <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete workout</button></div>`;
+}
+// "Get" runs the Shortcut; "Paste" is always there (also after the app was closed in between) and targets this workout
+function sesHealthBtns(s){
+  if(!s.start || !s.end) return '';
+  const waiting = S.healthPending && S.healthPending.target===s.id;
+  return `<div class="grid2" style="margin-top:8px"><button class="ghost big" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>
+    <button class="${waiting?'primary':'ghost'} big" data-act="healthPaste" data-id="${s.id}">Paste result</button></div>`;
 }
 let dayOpen=null;
 function daySheet(date){
@@ -1414,7 +1435,6 @@ function daySheet(date){
   }
   return `<div class="row between"><h2 style="margin:0">${fmtDate(date)} ${date.slice(0,4)}</h2><button class="icon" data-act="closeModal">✕</button></div>
   <div style="margin-top:12px">${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
-  ${healthPasteBtn()}
   <button class="ghost big" data-act="manualOpen" data-v="${date}">+ Add entry for this day</button>`;
 }
 
@@ -1792,7 +1812,7 @@ const MANUAL = [
   ]},
   {id:'wo', title:'🏋️ Workout', items:[
     {id:'startwo', title:'Start a workout', where:'Today → Start workout', text:'Choose what you train (planned one is preselected) and when you started (now or X min ago).'},
-    {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'Warm-up first, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. "Previous" only appears while you pull down at the top. ‹ top left goes back in one tap. "Back to current" returns to where you are. The screen stays on during a workout (Settings → General).'},
+    {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'First a short check-in (energy, motivation, soreness of the muscles this workout uses, sleep), then "Start workout" starts the clock and the warm-up, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. "Previous" only appears while you pull down at the top. ‹ top left goes back in one tap. "Back to current" returns to where you are. The screen stays on during a workout (Settings → General).'},
     {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it. A done set shows its time and seconds per rep (e.g. 4s/rep). "+ Add a set" works also after the exercise is finished: it brings you back to it.'},
     {id:'prog', title:'Go heavier (progression hint)', where:'Workout → under the exercise name', text:'If last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12), a green hint suggests more weight. Tap it to put +1 kg (changeable in Settings → General) on all working sets.'},
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
@@ -1860,8 +1880,14 @@ function openManual(focus){
 }
 
 /* ================= modal ================= */
-function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; growAll($('#modal')); }
-function closeModal(){ if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); $('#modal').innerHTML=''; dayOpen=null; woPull=null; sh=null; }
+let lockY=null;
+function bodyLock(on){
+  const b=document.body;
+  if(on && lockY==null){ lockY=window.scrollY; Object.assign(b.style,{position:'fixed', top:-lockY+'px', left:'0', right:'0'}); }
+  else if(!on && lockY!=null){ const y=lockY; lockY=null; Object.assign(b.style,{position:'', top:'', left:'', right:''}); window.scrollTo(0,y); }
+}
+function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; growAll($('#modal')); bodyLock(true); }
+function closeModal(){ if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); $('#modal').innerHTML=''; dayOpen=null; woPull=null; sh=null; bodyLock(false); }
 
 /* ================= events ================= */
 document.addEventListener('click', ev=>{
@@ -1971,6 +1997,8 @@ document.addEventListener('click', ev=>{
       else if(k==='stretch'){ W.stretch.end=Math.max(W.stretch.start+1000, Math.min(Date.now(),ts)); W.stage='context'; save(); closeModal(); render(); }
       else warmupDone(ts); break; }
     case 'back': goBack(); break;
+    case 'checkinDone': checkinDone(); break;
+    case 'checkinCancel': if(confirm('Cancel this workout? Nothing is saved.')){ S.settings.nextOverride=W.prevOverride||null; S.active=null; save(); go('today'); } break;
     case 'stretchYes': W.stretch={did:true, start:Date.now(), end:null}; W.stage='stretching'; save(); render(); break;
     case 'stretchNo': W.stretch={did:false}; W.stage='context'; save(); render(); break;
     case 'stretchDone': W.stretch.end=Date.now(); W.stage='context'; save(); render(); break;
@@ -1979,8 +2007,8 @@ document.addEventListener('click', ev=>{
     case 'discard': if(confirm('Discard this workout? No sets will be saved.'+(W.tplDraft?' Your template changes are kept as a new version.':''))){ tplCommit(); S.active=null; save(); go('today'); } break;
     // health
     case 'healthActive': requestHealth('active', W.start, W.end||Date.now()); break;
-    case 'healthSes': { const s=S.sessions.find(x=>x.id===t.dataset.id); if(s) requestHealth(s.id, s.start, s.end); break; }
-    case 'healthPaste': pasteHealth(); break;
+    case 'healthSes': { const s=S.sessions.find(x=>x.id===t.dataset.id); if(s){ const d=dayOpen; requestHealth(s.id, s.start, s.end); if(d) openModal(daySheet(d)); } break; }
+    case 'healthPaste': if(t.dataset.id){ S.healthPending={target:t.dataset.id, at:Date.now()}; save(false); } pasteHealth(); break;
     case 'healthManual': try{ applyHealth($('#hlTxt').value); }catch(e){ toast('Could not read it: '+e.message); } break;
     // history
     case 'day': dayOpen=v; openModal(daySheet(v)); break;
@@ -2068,7 +2096,7 @@ async function exportData(){
   const a=document.createElement('a'); a.href=URL.createObjectURL(file); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 // Coming back from the Shortcuts app: reload state from storage and refresh (unless a sheet is open)
-document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else tick(); } wakeSync(); });
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else if(dayOpen){ const d=dayOpen, sc=$('#modal .sheet').scrollTop; openModal(daySheet(d)); dayOpen=d; $('#modal .sheet').scrollTop=sc; } else tick(); } wakeSync(); });
 document.addEventListener('touchcancel',()=>{ if(sh){ sh.d=0; sheetEnd(); } woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
 
 render();
