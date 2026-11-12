@@ -263,3 +263,33 @@ body.notabs .dockbar{bottom:0;padding-bottom:calc(10px + env(safe-area-inset-bot
 .strip div{display:grid;place-items:center;min-width:0;white-space:nowrap;overflow:hidden}
 .k-mv{background:var(--move)} .k-ar{background:var(--muted)} .k-st{background:var(--accent)} .k-rs{background:var(--rest)} .k-wu{background:var(--pull)}
 .legend i.k-mv,.legend i.k-ar,.legend i.k-st,.legend i.k-rs,.legend i.k-wu{display:inline-block}
+/* ---- feedback round: multi-line info, template editor ---- */
+.exinfo,.pre,.move .nx small{white-space:pre-line}
+textarea.auto{min-height:44px;resize:none;overflow:hidden}
+.tedit{border-top:1px solid var(--line);padding:10px 0 4px;margin-top:10px}
+.tedit .grid2,.tedit .grid3{gap:8px}
+.tedit label.f{margin:10px 0 4px}
+/* steppers: − | value | + with clear dividers */
+.stp2{grid-template-columns:44px minmax(0,1fr) 44px;border:1px solid var(--line);background:var(--bg)}
+.stp2 button{background:var(--accent-soft);align-self:stretch;padding:12px 0}
+.stp2 button:first-child{border-right:1.5px solid var(--line)}
+.stp2 button:last-child{border-left:1.5px solid var(--line)}
+.stp2 button:active{background:var(--accent);color:var(--accent-ink);transform:none}
+/* bottom bar during a workout: just clear of the home indicator, not a full safe-area + margin above it */
+body.notabs .dockbar{padding-bottom:max(8px, calc(env(safe-area-inset-bottom) - 12px))}
+.set .sdur{display:flex;flex-direction:column;align-items:flex-end;line-height:1.2}
+.set .prep{font-size:11px;font-weight:600;color:var(--ink2)}
+.prog{display:flex;align-items:center;gap:8px;background:var(--good-soft);color:var(--ink);border-radius:10px;padding:8px 10px;font-size:13px}
+.prog span{flex:1}
+.tl>li.addset::before{display:none}
+.tl>li.addset{margin-top:-2px}
+.finished{background:var(--good-soft);border-radius:14px;padding:12px}
+/* "Previous" edge only appears while pulling down at the top */
+.edge.top{transition:max-height .15s,opacity .15s}
+.edge.top:not(.show){max-height:0;padding-top:0;padding-bottom:0;opacity:0;overflow:hidden;pointer-events:none}
+.edge.top.show{max-height:220px;opacity:1}
+/* pull-to-refresh indicator */
+#ptr{position:fixed;left:0;right:0;top:env(safe-area-inset-top);height:0;overflow:hidden;display:flex;align-items:flex-end;justify-content:center;gap:8px;padding-bottom:8px;font-size:13px;color:var(--muted);z-index:40;pointer-events:none}
+#ptr:not(.on){padding:0}
+#ptr .arw{width:28px;height:28px;border-radius:50%;background:var(--card);border:1px solid var(--line);display:grid;place-items:center;font-size:15px}
+#ptr.ready{color:var(--accent)} #ptr.ready .arw{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}

@@ -65,7 +65,7 @@ function defaultState(){
     profile:{ name:'', onboarded:false, obStep:0 },
     settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(), maxInRow:0,
       defaultRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
-      step:0.25, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
+      step:0.25, progStep:1, keepAwake:true, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
       backupToken:null, backupVerified:0 },
     templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)), tplHistory: {},
     planPins: {}, moves: [],
@@ -138,13 +138,31 @@ function warmWeight(w){
   return best || Math.round(w*0.4*4)/4;
 }
 // Saves a new template version. The previous one stays in tplHistory, so nothing is ever overwritten.
+// During a workout of that template the changes collect in a temporary copy (a.tplDraft) and become ONE new version
+// when the workout ends (tplCommit, on save or discard).
 function tplChange(key, note, fn){
+  const a = S.active;
+  if(a && a.key===key){
+    a.tplDraft = a.tplDraft || JSON.parse(JSON.stringify(S.templates[key])); fn(a.tplDraft);
+    (a.tplNotes = a.tplNotes||[]).push(note); return;
+  }
+  tplNewVersion(key, note, fn);
+}
+function tplNewVersion(key, note, fn){
   const t = JSON.parse(JSON.stringify(S.templates[key])); fn(t);
   t.v = (S.templates[key].v||1) + 1;
   (S.tplHistory[key] = S.tplHistory[key]||[]).push({v:t.v, at:Date.now(), note, tpl:JSON.parse(JSON.stringify(t))});
   S.templates[key] = t;
-  if(S.active && S.active.key===key) S.active.tplV = t.v;
 }
+function tplCommit(){
+  const a = S.active; if(!a || !a.tplDraft) return null;
+  const d = a.tplDraft, notes = a.tplNotes||[]; delete a.tplDraft; delete a.tplNotes;
+  const note = notes.length>2? `${notes.slice(0,2).join(', ')} +${notes.length-2} more` : notes.join(', ');
+  tplNewVersion(a.key, note || 'Changed during a workout', t=>{ t.warmup=d.warmup; t.exercises=d.exercises; });
+  a.tplV = S.templates[a.key].v;
+  return a.tplV;
+}
+const tplPendingNote = () => { const a=S.active; return a && a.tplDraft? `${keyLabel(a.key)} v${(S.templates[a.key].v||1)+1} is saved when the workout ends` : ''; };
 let S = load();
 function save(touch=true){ if(touch) S.lastChange=Date.now(); try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('Could not save: '+e.message); } }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
@@ -255,15 +273,46 @@ function requestHealth(target, start, end){ // target: 'active' or a session id
   S.healthPending = {target, at:Date.now()}; save(false);
   runShortcut(S.settings.healthShortcut||'Gym Health','text', `${fmtStamp(start)}|${fmtStamp(end)}`);
 }
+// Accepts JSON ({"steps":…}) or plain text like "steps=4321 kcal=250 hrAvg=120 hrMax=165" (one per line, : or = ),
+// or just four numbers in that order. Numbers may have units, ' or ’ as thousands separator and a decimal comma.
+function parseHealth(txt){
+  txt = String(txt||'').trim();
+  if(!txt) throw new Error('the clipboard is empty');
+  const clean = v => { let t=String(v??'').replace(/[’'\s]/g,'');
+    t = t.includes('.') || /,\d{3}(?!\d)/.test(t)? t.replace(/,/g,'') : t.replace(',','.'); // 1,234 / 1,234.5 → thousands; 250,5 → decimal
+    const n=parseFloat(t.replace(/[^0-9.\-]/g,'')); return isFinite(n)? n : 0; };
+  let d=null; try{ d=JSON.parse(txt); }catch(e){}
+  const out={};
+  const put=(k,v)=>{ k=String(k).toLowerCase().replace(/[^a-z]/g,'');
+    const key = /step/.test(k)? 'steps' : /kcal|cal|energy/.test(k)? 'kcal' : /max/.test(k)? 'hrMax' : /avg|average|hr|heart/.test(k)? 'hrAvg' : null;
+    if(key) out[key]=clean(v); };
+  if(d && typeof d==='object' && !Array.isArray(d)) Object.entries(d).forEach(([k,v])=>put(k,v));
+  else {
+    // key = the word right before : or = (units like "count" in front of it are ignored)
+    const re=/([A-Za-z]+)\s*[:=]\s*([\d’',.]*\d)/g; let m, any=false;
+    while((m=re.exec(txt))){ put(m[1], m[2]); any=true; }
+    if(!any){ const nums=txt.split(/[\n|;]+/).map(clean); ['steps','kcal','hrAvg','hrMax'].forEach((k,i)=>{ if(nums[i]!=null) out[k]=nums[i]; }); }
+  }
+  if(!Object.keys(out).length) throw new Error('no steps / kcal / heart rate found in “'+txt.slice(0,40)+'”');
+  return {steps:Math.round(out.steps||0), kcal:Math.round(out.kcal||0), hrAvg:Math.round(out.hrAvg||0), hrMax:Math.round(out.hrMax||0)};
+}
+function applyHealth(txt){
+  const h = parseHealth(txt);
+  const tgt = S.healthPending && S.healthPending.target;
+  if(tgt==='active' && S.active) S.active.health = h;
+  else { const s=S.sessions.find(x=>x.id===tgt); if(!s) throw new Error('no workout is waiting for health data'); s.health=h; }
+  S.healthPending = null; save(); closeModal(); render(); toast(`Health data added: ${h.steps} steps, ${h.kcal} kcal`);
+}
 async function pasteHealth(){
-  try{
-    const d = JSON.parse(await navigator.clipboard.readText());
-    const h = {steps:Math.round(num(d.steps)), kcal:Math.round(num(d.kcal)), hrAvg:Math.round(num(d.hrAvg)), hrMax:Math.round(num(d.hrMax))};
-    const tgt = S.healthPending && S.healthPending.target;
-    if(tgt==='active' && S.active) S.active.health = h;
-    else { const s=S.sessions.find(x=>x.id===tgt); if(!s) throw new Error('No workout waiting for health data'); s.health=h; }
-    S.healthPending = null; save(); closeModal(); render(); toast(`Health data added: ${h.steps} steps, ${h.kcal} kcal`);
-  }catch(e){ toast('Could not read health data: '+e.message); }
+  let txt='';
+  try{ txt = await navigator.clipboard.readText(); }catch(e){}
+  try{ applyHealth(txt); }
+  catch(e){ // e.g. the Shortcut copied a Dictionary (not text): let the user paste by hand
+    openModal(`<h2>Paste Apple Health result</h2><p class="small ink2">Could not read it automatically (${esc(e.message)}). Long-press the box below → <b>Paste</b>, then tap Add.</p>
+      <textarea class="auto" rows="3" id="hlTxt" placeholder="steps=4321&#10;kcal=250&#10;hrAvg=120&#10;hrMax=165"></textarea>
+      <p class="small muted">Tip: in the Shortcut, put a <b>Text</b> action before <b>Copy to Clipboard</b> (see Settings → Apple Health).</p>
+      <div class="grid2" style="margin-top:10px"><button class="big" data-act="closeModal">Cancel</button><button class="primary big" data-act="healthManual">Add</button></div>`);
+  }
 }
 
 /* ================= helpers ================= */
@@ -275,6 +324,7 @@ const parseISO = s => { const [y,m,d]=s.split('-').map(Number); return new Date(
 const addDays = (s,n) => { const d=parseISO(s); d.setDate(d.getDate()+n); return iso(d); };
 const mondayOf = s => { const d=parseISO(s); const wd=(d.getDay()+6)%7; d.setDate(d.getDate()-wd); return iso(d); };
 const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const DOWL = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const fmtDate = s => { const d=parseISO(s); return `${DOW[d.getDay()]} ${d.getDate()}.${d.getMonth()+1}.`; };
 const fmtDur = ms => { const m=Math.max(0,Math.round(ms/60000)); return m>=60? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`; };
@@ -295,6 +345,9 @@ function e1rm(e, s){ const r=num(s.r), w=num(s.w); if(!r||!w||!hasWeight(e)) ret
 function sessionVolume(ses){ let v=0; (ses.exercises||[]).forEach(e=>e.sets.forEach(s=>{ if(s.done) v+=setLoad(e,s); })); return v; }
 function sessionSets(ses){ let n=0; (ses.exercises||[]).forEach(e=>e.sets.forEach(s=>{ if(s.done) n++; })); return n; }
 function doneSessions(){ return sortSessions(S.sessions.filter(s=>s.status==='done')); }
+// "Other activity" entries (golf, swimming …) are logged like a workout but never count for the training plan
+const isGym = s => !s.activity;
+const gymOn = d => S.sessions.filter(s=>s.date===d && isGym(s));
 // "Top" value of an exercise in a session: heaviest weight (or longest hold / duration)
 function topVal(e){ const d=e.sets.filter(s=>s.done); if(!d.length) return 0; return hasWeight(e)? Math.max(...d.map(s=>num(s.w))) : Math.max(...d.map(s=>num(s.r))); }
 function setLabel(e, s){
@@ -332,7 +385,7 @@ function rotationState(){
   let idx = 0;
   if (S.settings.nextOverride && rot.includes(S.settings.nextOverride)) idx = rot.indexOf(S.settings.nextOverride);
   else {
-    const pool = sortSessions(S.sessions.filter(s=> s.status==='done' || (S.settings.skipAdvances && s.status==='skip')));
+    const pool = sortSessions(S.sessions.filter(s=> isGym(s) && (s.status==='done' || (S.settings.skipAdvances && s.status==='skip'))));
     const last = pool[pool.length-1];
     if (last) idx = (rot.indexOf(last.type)+1) % rot.length;
   }
@@ -350,7 +403,7 @@ function consume(st, key){
 function planDays(n){
   const st = rotationState(), today = iso(), out = [];
   for(let i=0;i<n;i++){
-    const d = addDays(today,i), logged = S.sessions.filter(s=>s.date===d), pin = S.planPins[d];
+    const d = addDays(today,i), logged = gymOn(d), pin = S.planPins[d];
     if(logged.length){ out.push({date:d, key:null, pinned:!!pin, logged}); continue; }
     // pin 'train' = training day created by a move (workout follows the rotation); 'rest' = rest day; else a fixed workout
     const key = pin==='train'? takeNext(st) : pin || (isRestDay(d)? 'rest' : takeNext(st));
@@ -381,7 +434,7 @@ function weeklyMaxRun(){ // longest run of training days in the weekly schedule 
   let best=0, run=0; for(let i=0;i<14;i++){ if(train[i%7]){ run++; best=Math.max(best,run); } else run=0; } return best;
 }
 const maxInRow = () => S.settings.maxInRow || weeklyMaxRun();
-function trainingOn(d, pins){ if(S.sessions.some(s=>s.date===d && s.status==='done')) return true; const p=pins[d]; return p? p!=='rest' : !isRestDay(d); }
+function trainingOn(d, pins){ if(gymOn(d).some(s=>s.status==='done')) return true; const p=pins[d]; return p? p!=='rest' : !isRestDay(d); }
 // length of the run of consecutive training days that contains day d
 function runAt(d, pins){
   if(!trainingOn(d,pins)) return 0;
@@ -397,7 +450,7 @@ function moveCheck(from, to){
 function moveCandidates(from){
   const out=[];
   for(const off of [-3,-2,-1,1,2,3]){ const d=addDays(from,off);
-    if(S.sessions.some(s=>s.date===d)) continue;            // already logged
+    if(gymOn(d).length) continue;                           // already logged
     if(S.moves.some(m=>m.from===d)) continue;               // freed by another move
     out.push(Object.assign({date:d}, moveCheck(from,d))); }
   return out;
@@ -442,7 +495,7 @@ function firstTrackedDay(){
 }
 function unaccountedDays(){
   const out=[], today=iso(), start=firstTrackedDay();
-  for(let i=120;i>=1;i--){ const d=addDays(today,-i); if(d<start || S.sessions.some(s=>s.date===d)) continue;
+  for(let i=120;i>=1;i--){ const d=addDays(today,-i); if(d<start || gymOn(d).length) continue;
     const pin=S.planPins[d]; if(pin==='rest' || (!pin && isRestDay(d))) continue; out.push(d); }
   return out;
 }
@@ -475,14 +528,22 @@ function renderTabs(){
 function render(){
   if(S.active) VIEW='workout';
   else if(VIEW==='workout') VIEW='today';
-  applyTheme(); renderTabs();
+  applyTheme(); renderTabs(); wakeSync();
   if(!S.profile.onboarded){ $('#app').innerHTML = viewOnboarding(); renderTimer(); return; }
   $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
   if (VIEW==='stats') mountCharts();
-  renderTimer(); tick();
+  renderTimer(); tick(); growAll($('#app'));
   if (VIEW==='workout') afterWorkoutRender();
 }
 function go(v){ VIEW=v; window.scrollTo(0,0); render(); }
+// Keep the screen on while a workout runs (Screen Wake Lock API, iOS 16.4+; in Home Screen apps reliable from iOS 18.4)
+let wakeLock=null, wakeBusy=false;
+function wakeSync(){
+  const want = !!(S.active && S.settings.keepAwake && !document.hidden && navigator.wakeLock);
+  if(want && !wakeLock && !wakeBusy){ wakeBusy=true;
+    navigator.wakeLock.request('screen').then(l=>{ wakeLock=l; l.addEventListener('release',()=>{ wakeLock=null; }); }).catch(()=>{}).finally(()=>{ wakeBusy=false; }); }
+  else if(!want && wakeLock){ wakeLock.release().catch(()=>{}); wakeLock=null; }
+}
 function toast(msg){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2800); }
 function applyTheme(){ const t=S.settings.theme; if(t==='auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme',t); }
 const healthPasteBtn = () => S.healthPending ? `<button class="primary big" style="margin:0 0 12px" data-act="healthPaste">Paste Apple Health result</button>` : '';
@@ -540,11 +601,12 @@ function obNext(){
 }
 
 /* ================= TODAY ================= */
-function dayMarks(list){ return list.map(s=> s.status==='done'?`<span class="t-${s.type}">●</span>`:'<span style="color:var(--bad)">✕</span>').join(''); }
+function dayMarks(list){ return list.map(s=> s.activity? '<span class="muted">○</span>' : s.status==='done'?`<span class="t-${s.type}">●</span>`:'<span style="color:var(--bad)">✕</span>').join(''); }
 // Marker for one day: logged entries, the planned workout (future), or a "?" for a past training day without entry
 function dayCell(d, planMap, missing){
-  const list=S.sessions.filter(s=>s.date===d);
-  if(list.length) return dayMarks(list);
+  const list=S.sessions.filter(s=>s.date===d), gym=list.filter(isGym), act=list.filter(s=>s.activity);
+  if(gym.length) return dayMarks(list);
+  if(act.length && (d<iso() || !planMap[d] || !planMap[d].key || planMap[d].key==='rest')) return dayMarks(act);
   if(S.moves.some(m=>m.from===d)) return '<span class="mv">↔</span>';
   const p=planMap[d];
   if(p && p.key) return p.key==='rest'? `<span class="muted">${p.pinned?'📌':''}–</span>` : `<span class="plan t-${keyType(p.key)}">${p.pinned?'📌':p.moved?'↔':''}${keyShort(p.key)}</span>`;
@@ -553,11 +615,11 @@ function dayCell(d, planMap, missing){
 }
 // One calendar cell (Today's 2-week view and the month view). Upcoming planned training days get a dashed outline.
 function calCell(ds, planMap, missing, showMonth){
-  const today=iso(), list=S.sessions.filter(s=>s.date===ds), movedFrom=S.moves.some(m=>m.from===ds), p=planMap[ds];
+  const today=iso(), list=gymOn(ds), movedFrom=S.moves.some(m=>m.from===ds), p=planMap[ds];
   let cls = list.some(s=>s.status==='done')? 'cd' : list.length? 'cs' : movedFrom? 'cm' : '';
   if(!list.length && !movedFrom && ds>=today && p && p.key && p.key!=='rest') cls += ' up';
   if(missing.includes(ds)) cls += ' tolog';
-  const cell = (ds<today && !list.length && !missing.includes(ds) && !movedFrom)? '' : dayCell(ds, planMap, missing);
+  const cell = (ds<today && !S.sessions.some(s=>s.date===ds) && !missing.includes(ds) && !movedFrom)? '' : dayCell(ds, planMap, missing);
   const dd=parseISO(ds), label = showMonth && dd.getDate()===1? `${dd.getDate()}.${dd.getMonth()+1}.` : dd.getDate();
   return `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${label}</div><div class="st">${cell}</div></div>`;
 }
@@ -588,18 +650,32 @@ function viewToday(){
   if (S.active) {
     main = `<div class="card"><h2>Workout in progress</h2><p class="ink2">${esc(woLabel(S.active))} · started ${fmtTime(S.active.start)}</p><button class="primary big" data-act="tab" data-v="workout">Continue workout</button></div>`;
   } else {
-    const doneToday = S.sessions.find(s=>s.date===today && s.status==='done');
-    main = `<div class="card">
-      <div class="row between"><span class="muted small">${doneToday?'Next in rotation':rest?'Today: rest day':'Today’s plan'}</span>${tp.pinned?'<span class="pill">📌 fixed</span>':''}</div>
-      ${rest && !doneToday? `<div class="hero">Rest</div><p class="small ink2" style="margin:4px 0 0">Recovery comes before the calendar.${nt?` Next: <b>${esc(keyLabel(nt.key))}</b> on ${fmtDate(nt.date)}.`:''} You can still train today if you want to.</p>`
+    const doneToday = S.sessions.find(s=>s.date===today && s.status==='done' && isGym(s));
+    const acts = S.sessions.filter(s=>s.date===today && s.activity);
+    const actLine = acts.length? `<p class="small ink2" style="margin:8px 0 0">Today also: ${acts.map(s=>esc(s.activity)+(s.start&&s.end?' '+fmtDur(s.end-s.start):'')).join(', ')}</p>` : '';
+    if(doneToday){
+      // trained today: the big title is the NEXT workout, with its day, so it never reads like "Push today"
+      const nx = nextTraining(), nk = nx? nx.key : nextPlan().key, inDays = nx? daysBetween(today, nx.date) : null;
+      const nd = nx? parseISO(nx.date) : null;
+      const when = inDays===1? 'Tomorrow' : nd? `On ${DOWL[nd.getDay()]}, ${nd.getDate()}.${nd.getMonth()+1}.` : '';
+      main = `<div class="card">
+        <div class="small" style="color:var(--good);font-weight:600">✓ Trained today: ${esc(woLabel(doneToday))}${doneToday.start&&doneToday.end?' · '+fmtDur(doneToday.end-doneToday.start):''}</div>
+        <div class="muted small" style="margin-top:12px">Next workout</div>
+        <div class="hero t-${keyType(nk)}">${esc(keyLabel(nk))}</div>
+        ${when?`<div class="ink2 small" style="margin-top:2px">${when}</div>`:''}${actLine}
+        <button class="link" style="margin-top:8px" data-act="startOpen">+ Another workout or activity (golf, swimming …)</button>
+      </div>`;
+    } else main = `<div class="card">
+      <div class="row between"><span class="muted small">${rest?'Today: rest day':'Today’s plan'}</span>${tp.pinned?'<span class="pill">📌 fixed</span>':''}</div>
+      ${rest? `<div class="hero">Rest</div><p class="small ink2" style="margin:4px 0 0">Recovery comes before the calendar.${nt?` Next: <b>${esc(keyLabel(nt.key))}</b> on ${fmtDate(nt.date)}.`:''} You can still train today if you want to.</p>`
       : `<div class="hero t-${plan.type}">${esc(plan.type)}${plan.boulder?' + Boulder':''}</div>
       ${plan.type==='Pull' && S.settings.boulderEvery2nd?`<p class="small ink2" style="margin:4px 0 0">${plan.boulder?'Every 2nd Pull day: bouldering first, then pull-ups, rows, biceps and shrugs.':'Regular gym Pull day. The next Pull day is a bouldering day.'}</p>`:''}`}
-      ${doneToday?`<p class="small" style="color:var(--good)">✓ Already trained today (${esc(doneToday.type)}).</p>`:''}
+      ${actLine}
       <div class="grid2" style="margin-top:12px">
         <button class="primary big" data-act="startOpen">Start workout</button>
         <button class="big danger" data-act="skipOpen">Log skip</button>
       </div>
-      ${!doneToday && !rest? '<button class="link" data-act="moveOpen" data-v="'+today+'">↔ Move today’s workout to a rest day</button>' : ''}
+      ${!rest? '<button class="link" data-act="moveOpen" data-v="'+today+'">↔ Move today’s workout to a rest day</button>' : ''}
     </div>`;
   }
   const runs = longRuns(13);
@@ -767,7 +843,7 @@ function gearSave(toTpl){
       const fields={name, info, target, rest, warm:nw, sets:ns};
       if(te) Object.assign(te, fields); else tp.exercises.push(Object.assign({kind:e.kind, muscle:e.muscle}, fields)); });
     e.tplName=name;
-    toast(`${keyLabel(a.key)} v${S.templates[a.key].v} is in use now. v${S.templates[a.key].v-1} is kept in Settings.`);
+    toast(tplPendingNote());
   } else toast('Changed for this workout only');
 }
 
@@ -779,9 +855,9 @@ function syncWarm(e, si){
 function wuGearSheet(){
   const a=A(), v=S.templates[a.key].v||1;
   return `<h2>⚙ Warm-up</h2>
-  <label class="f">What you do (shown under the title)</label><textarea id="wuText" placeholder="e.g. 5 min rowing, band pull-aparts">${esc(a.warmup.text)}</textarea>
+  <label class="f">What you do (shown under the title)</label><textarea class="auto" rows="2" id="wuText" placeholder="e.g. 5 min rowing, band pull-aparts">${esc(a.warmup.text)}</textarea>
   <label class="f">Planned minutes</label><input id="wuMin" inputmode="numeric" value="${a.warmup.minutes||0}">
-  <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b> keeps ${esc(keyLabel(a.key))} v${v} in Settings and puts v${v+1} in use right away.</span></div>
+  <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b>: today's workout uses it right away. ${esc(keyLabel(a.key))} v${v+1} is saved once when the workout ends (all changes of this workout together); v${v} stays in Settings.</span></div>
   <div class="grid2" style="margin-top:10px"><button class="big" data-act="wuSave" data-v="once">This workout only</button><button class="primary big" data-act="wuSave" data-v="tpl">Also update template</button></div>
   <button class="big" style="margin-top:8px;background:transparent;border:0" data-act="closeModal">Cancel</button>`;
 }
@@ -803,11 +879,13 @@ function setEditor(e, x, si){
   return `<div class="edit">${hasWeight(e)?`<div class="stp2"><button data-act="stepW" data-s="${si}" data-v="-1" aria-label="Less weight">−</button><label><input inputmode="decimal" data-in="w" data-s="${si}" value="${esc(fw(x.w))}"><small>kg ±${fw(st)}</small></label><button data-act="stepW" data-s="${si}" data-v="1" aria-label="More weight">+</button></div>`:''}
     <div class="stp2"><button data-act="stepR" data-s="${si}" data-v="-1" aria-label="Less">−</button><label><input inputmode="numeric" data-in="r" data-s="${si}" value="${esc(x.r)}"><small>${repUnit(e)}</small></label><button data-act="stepR" data-s="${si}" data-v="1" aria-label="More">+</button></div></div>`;
 }
+// seconds per rep of a finished set, e.g. "4s/rep" (rep-based exercises only)
+function perRep(e, x){ const r=num(x.r); if(!['w','bw','reps'].includes(e.kind) || !(r>0) || !x.start || !x.end) return ''; return `<span class="prep">${x.est?'~':''}${Math.max(1,Math.round((x.end-x.start)/1000/r))}s/rep</span>`; }
 function setRow(e, x, si, label, live, isNext){
   const st=setState(x), left=!!e.left;
   const open = woFocus===si || st==='run' || (live && isNext && woFocus==null && !left);
   let btns;
-  if(st==='done') btns=`<span class="sdur">${x.est?'~':''}${fmtClock(x.end-x.start)}</span><button class="ck" data-act="setCheck" data-s="${si}" aria-label="Undo set">✓</button>`;
+  if(st==='done') btns=`<span class="sdur">${x.est?'~':''}${fmtClock(x.end-x.start)}${perRep(e,x)}</span><button class="ck" data-act="setCheck" data-s="${si}" aria-label="Undo set">✓</button>`;
   else if(st==='run') btns=`<span class="runclock" data-up="${x.start}">${fmtClock(Date.now()-x.start)}</span><button class="ck" data-act="setCheck" data-s="${si}">✓ Done</button>`;
   else if(left || !live) btns=`<span class="small muted">${left?'not done':'planned'}</span>`;
   else btns=`<button class="go" data-act="setStart" data-s="${si}">▶ Start</button><button class="ck" data-act="setCheck" data-s="${si}" aria-label="Done without Start">✓</button>`;
@@ -820,6 +898,18 @@ function restRow(e, a, b, live){
   return '';
 }
 function exSummary(e){ const w=e.sets.filter(x=>!x.warm), t=w[0]; return `${w.length} × ${esc(e.target)}${hasWeight(e)&&t?' · '+fw(t.w)+' kg':''} · rest ${e.rest} s`; }
+// Progression: last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12) → suggest more weight.
+const topReps = target => { const m=String(target||'').match(/\d+/g); return m? Math.max(...m.map(Number)) : 0; };
+function progressHint(e){
+  if(!hasWeight(e)) return null;
+  const top=topReps(e.target), prev=prevOccurrence(e.name, null); if(!top || !prev) return null;
+  const ps=prev.sets.filter(s=>s.done && !s.warm), n=e.sets.filter(x=>!x.warm).length;
+  if(ps.length<Math.max(1,n) || !ps.every(s=>num(s.r)>=top)) return null;
+  const pw=Math.max(...ps.map(s=>num(s.w))), step=S.settings.progStep||1;
+  const work=e.sets.filter(x=>!x.warm);
+  if(work.some(x=>x.end) || work.some(x=>num(x.w)>pw)) return null; // already heavier, or sets already started
+  return {top, n:ps.length, pw, step, to:Math.round((pw+step)*100)/100};
+}
 function exScreen(){
   const a=A(), i=a.view, e=a.exercises[i], n=a.exercises.length;
   const live = i===a.idx, past = !live && !!e.arrived, nIdx=nextExIdx();
@@ -831,6 +921,8 @@ function exScreen(){
     <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
     ${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
     <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
+  const ph = live && !a.moving? progressHint(e) : null;
+  if(ph) rows.push(`<li class="ev"><div class="prog"><span>⬆ Last time ${ph.n} × ${ph.top} (top of ${esc(e.target)}). Go heavier: <b>${fw(ph.to)} kg</b></span><button class="small primary" data-act="progApply">+${fw(ph.step)} kg</button></div></li>`);
   if(!live && !past && a.moving && i===nIdx) rows.push(`<li class="mv"><div class="move"><div class="small">On the way here</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div></div></li>`);
   if(e.arrived){ const fs=e.sets.filter(x=>x.start).map(x=>x.start).sort((p,q)=>p-q)[0];
     rows.push(`<li class="ev">Arrived <b>${fmtTime(e.arrived)}</b> · setting up <b ${fs?'':`data-up="${e.arrived}"`}>${fmtClock((fs||Date.now())-e.arrived)}</b></li>`); }
@@ -842,9 +934,12 @@ function exScreen(){
     if(k>0 && e.sets[k-1].end) rows.push(restRow(e, e.sets[k-1], x, lr===k-1));
     rows.push(setRow(e, x, k, x.warm? 'W'+(++wi) : String(++si), live, k===firstTodo));
   });
-  if(live && a.moving) rows.push(`<li class="mv"><div class="move"><div class="small">${e.skipped?'Skipped · moving on':'Moving to the next exercise'}</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div>${nIdx>=0?`<div class="nx">${esc(a.exercises[nIdx].name)}${a.exercises[nIdx].info?`<small>${esc(a.exercises[nIdx].info)}</small>`:''}</div>`:'<div class="nx">That was the last exercise</div>'}</div></li>`);
+  if(live && !e.skipped) rows.push(`<li class="addset"><button class="link" data-act="setAdd">+ Add a set</button></li>`);
+  if(live && a.moving && nIdx<0) rows.push(`<li class="done"><div class="finished"><div class="exname sm">✓ All exercises done</div><div class="small ink2">${a.exercises.filter(x=>x.arrived&&!x.skipped).length} of ${n} exercises · ${fmtDur(a.moving-a.start)} so far. Tap <b>Finish workout</b> below.</div></div></li>`);
+  else if(live && a.moving) rows.push(`<li class="mv"><div class="move"><div class="small">${e.skipped?'Skipped · moving on':'Moving to the next exercise'}</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div><div class="nx">${esc(a.exercises[nIdx].name)}${a.exercises[nIdx].info?`<small>${esc(a.exercises[nIdx].info)}</small>`:''}</div></div></li>`);
   else if(e.left){ const nx=a.exercises[i+1]; if(nx && nx.arrived) rows.push(`<li class="mvl"><div class="mvrow">Moving <b>${fmtClock(nx.arrived-e.left)}</b></div></li>`); }
-  const top = i>0? `<button class="edge" id="edge-up" data-act="exPrev">${edgeInner('up',false)}</button>`
+  // "Previous" stays hidden until you pull down at the top (like pull-to-refresh)
+  const top = i>0? `<button class="edge top${woArmed==='up'?' show':''}" id="edge-up" data-act="exPrev">${edgeInner('up',false)}</button>`
     : `<div class="edge stat">Started <b>${fmtTime(a.start)}</b>${a.warmup.end?` · warm-up <b>${fmtClock(a.warmup.end-a.warmup.start)}</b>`:''}</div>`;
   const bot = i<n-1? `<button class="edge bot" id="edge-down" data-act="exNext">${edgeInner('down',false)}</button>` : `<div class="edge bot stat">Last exercise of the workout</div>`;
   const banner = past? `<div class="viewing">Earlier exercise. You can still fix kg and reps.</div>` : !live? `<div class="viewing">Not started yet. It begins with “I'm at the machine”.</div>` : '';
@@ -932,7 +1027,7 @@ function renderTimer(){
   const nIdx=nextExIdx(), nx=nIdx>=0? a.exercises[nIdx] : null, e=curEx();
   let html;
   if(warm) html = `<button class="primary big" data-act="warmupDone">Warm-up done${a.exercises[0]?`<span class="sub">Next: ${esc(a.exercises[0].name)}</span>`:''}</button>`;
-  else if(a.moving) html = nx? `<button class="big mvb" data-act="arrive">I'm at the machine<span class="sub">${esc(nx.name)}</span></button>` : `<button class="primary big" data-act="arrive">Finish workout</button>`;
+  else if(a.moving) html = nx? `<button class="big mvb" data-act="arrive">I'm at the machine<span class="sub">${esc(nx.name)}</span></button>` : `<button class="primary big" data-act="arrive">Finish workout<span class="sub">Stretching and how it went</span></button>`;
   else if(a.view!==a.idx) html = `<button class="primary big" data-act="exToCur">Back to current<span class="sub">${esc(e?e.name:'')}</span></button>`;
   else { const none = e && !e.sets.some(x=>x.start||x.end);
     html = `<div class="dockrow"><button class="big danger" data-act="exSkipOpen">⤼ Skip</button><button class="big" data-act="exMoveOn">Move on<span class="sub">${nx?'→ '+esc(nx.name):'Finish'}</span></button></div><div class="note">${none?'Nothing ticked: all sets count, time split evenly':'Sets you haven\'t done won\'t count'}</div>`; }
@@ -967,7 +1062,7 @@ setInterval(tick, 500);
 /* ---- switching exercises: past the top/bottom edge twice (touch drag or mouse wheel) ---- */
 const PULL_AT=60;
 function gestureOn(){ return VIEW==='workout' && inSteps() && !$('#modal').innerHTML; }
-function atTop(){ return window.scrollY<=1; }
+function atTop(){ return window.scrollY<=3; }
 function atBottom(){ return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2; }
 function edgeDir(goingUp){
   const a=A();
@@ -980,7 +1075,7 @@ function updateEdges(drag){
     const d = drag && drag.dir===dir? drag.d : 0, ready=d>=PULL_AT;
     el.classList.toggle('armed', woArmed===dir); el.classList.toggle('ready', ready);
     el.innerHTML=edgeInner(dir, ready);
-    if(dir==='up') el.style.paddingTop=(8+Math.min(d,110))+'px';
+    if(dir==='up'){ el.classList.toggle('show', d>0 || woArmed==='up'); el.style.paddingTop = d>0? (8+Math.min(d,110))+'px' : ''; }
     else { el.style.paddingBottom=(10+Math.min(d,110))+'px'; if(d) window.scrollTo(0, document.documentElement.scrollHeight); }
   });
 }
@@ -989,8 +1084,25 @@ function edgeGesture(dir){
   woArmed=dir; clearTimeout(woArmT); woArmT=setTimeout(()=>{ woArmed=null; updateEdges(); },3000); updateEdges();
 }
 let woPull=null, wAcc=0, wDir=null, wLock=0, wIdle=0;
-document.addEventListener('touchstart',ev=>{ woPull = gestureOn()? {y:ev.touches[0].clientY, d:0, dir:null} : null; },{passive:true});
+/* pull-to-refresh on Today / History / Stats / Settings: reloads the data and checks for a new app version */
+let ptr=null;
+function ptrOn(){ return VIEW!=='workout' && S.profile.onboarded && !$('#modal').innerHTML; }
+function ptrShow(d){
+  let el=$('#ptr'); if(!el){ el=document.createElement('div'); el.id='ptr'; document.body.appendChild(el); }
+  const ready=d>=PULL_AT; el.className=d>0?'on'+(ready?' ready':''):''; el.style.height=Math.min(d,110)+'px';
+  el.innerHTML=d>0? `<span class="arw">${ready?'⟳':'↓'}</span>${ready?'Let go to refresh':'Pull to refresh'}` : '';
+}
+function ptrRefresh(){
+  S=load(); render(); if(!window.GymLoader) toast('Refreshed');
+  if(window.GymLoader) GymLoader.checkNow(true);
+}
+document.addEventListener('touchstart',ev=>{
+  woPull = gestureOn()? {y:ev.touches[0].clientY, d:0, dir:null} : null;
+  ptr = ptrOn() && atTop()? {y:ev.touches[0].clientY, d:0} : null;
+},{passive:true});
 document.addEventListener('touchmove',ev=>{
+  if(ptr){ const dy=ev.touches[0].clientY-ptr.y;
+    if(dy>0 && atTop()){ ev.preventDefault(); ptr.d=dy*0.5; ptrShow(ptr.d); } else if(ptr.d){ ptr.d=0; ptrShow(0); } }
   if(!woPull) return; const dy=ev.touches[0].clientY-woPull.y;
   const dir = woPull.dir || (dy!==0? edgeDir(dy>0) : null);
   if(!dir || (dir==='up'&&dy<=0) || (dir==='down'&&dy>=0)){ if(woPull.dir){ woPull.d=0; updateEdges(); } return; }
@@ -998,7 +1110,9 @@ document.addEventListener('touchmove',ev=>{
   if(!woPull.dir){ woPull.dir=dir; woPull.y=ev.touches[0].clientY; return; } // measure from where the edge was reached
   woPull.d=Math.abs(dy)*0.5; updateEdges({dir, d:woPull.d});
 },{passive:false});
-document.addEventListener('touchend',()=>{ if(!woPull) return; const p=woPull; woPull=null; if(!p.dir) return; updateEdges(); if(p.d>=PULL_AT) edgeGesture(p.dir); });
+document.addEventListener('touchend',()=>{
+  if(ptr){ const p=ptr; ptr=null; ptrShow(0); if(p.d>=PULL_AT) ptrRefresh(); }
+  if(!woPull) return; const p=woPull; woPull=null; if(!p.dir) return; updateEdges(); if(p.d>=PULL_AT) edgeGesture(p.dir); });
 document.addEventListener('wheel',ev=>{
   if(!gestureOn()) return; const dir=edgeDir(ev.deltaY<0); if(!dir) return;
   ev.preventDefault(); if(Date.now()<wLock) return;
@@ -1029,10 +1143,10 @@ function exGearSheet(){
   const a=A(), e=viewEx(), ws=e.sets.filter(x=>x.warm).length, ns=e.sets.length-ws, v=S.templates[a.key].v||1;
   return `<h2>⚙ ${esc(e.name)}</h2><p class="small ink2" style="margin-top:0">kg and reps are changed directly on the sets.</p>
   <label class="f">Name (write “single handedly” here if it's one arm or leg)</label><input id="gName" value="${esc(e.name)}">
-  <label class="f">Info line under the name</label><input id="gInfo" value="${esc(e.info)}" placeholder="e.g. Setting 7 · elbows down">
+  <label class="f">Info under the name (new lines allowed)</label><textarea class="auto" rows="1" id="gInfo" placeholder="e.g. Setting 7 · elbows down">${esc(e.info)}</textarea>
   <div class="grid2"><div><label class="f">Warm-up sets</label><input id="gWarm" inputmode="numeric" value="${ws}"></div><div><label class="f">Working sets</label><input id="gSets" inputmode="numeric" value="${ns}"></div>
   <div><label class="f">Target (reps)</label><input id="gTarget" value="${esc(e.target)}"></div><div><label class="f">Rest (s)</label><input id="gRest" inputmode="numeric" value="${e.rest}"></div></div>
-  <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b> keeps ${esc(keyLabel(a.key))} v${v} in Settings and puts v${v+1} in use right away.</span></div>
+  <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b>: today's workout uses it right away. ${esc(keyLabel(a.key))} v${v+1} is saved once when the workout ends (all changes of this workout together); v${v} stays in Settings.</span></div>
   <div class="grid2" style="margin-top:10px"><button class="big" data-act="gearSave" data-v="once">This workout only</button><button class="primary big" data-act="gearSave" data-v="tpl">Also update template</button></div>
   <button class="link" style="color:var(--bad);margin-top:6px" data-act="gearRemove">Remove from template…</button>
   <button class="big" style="margin-top:8px;background:transparent" data-act="closeModal">Cancel</button>`;
@@ -1050,7 +1164,7 @@ function exMoveSheet(){
 function exAddSheet(){
   return `<h2>Add exercise</h2><p class="small ink2" style="margin-top:0">It comes right after the current exercise.</p>
   <label class="f">Name</label><input id="aName" placeholder="e.g. Reverse Flys single handedly">
-  <label class="f">Info line</label><input id="aInfo" placeholder="e.g. Bench at 45°">
+  <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" id="aInfo" placeholder="e.g. Bench at 45°"></textarea>
   <div class="grid2"><div><label class="f">Type</label><select id="aKind">${Object.entries(KINDS).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select></div>
   <div><label class="f">Muscle</label><select id="aMuscle">${MUSCLES.map(m=>`<option>${m}</option>`).join('')}</select></div></div>
   <div class="grid3"><div><label class="f">Sets</label><input id="aSets" inputmode="numeric" value="3"></div><div><label class="f">kg</label><input id="aW" inputmode="decimal" value=""></div><div><label class="f">Reps</label><input id="aR" inputmode="numeric" value="10"></div></div>
@@ -1061,10 +1175,22 @@ function exAddSheet(){
 function exSkipSheet(){ const e=curEx();
   return `<h2>Skip ${esc(e.name)}?</h2><p class="small ink2">${e.sets.some(x=>x.end)?'The sets you already ticked still count. ':''}Moving to the next exercise starts now.</p>
   <div class="grid2"><button class="big" data-act="closeModal">Cancel</button><button class="big no" data-act="exSkip">Skip exercise</button></div>`; }
+let startMode='gym';
 function startSheet(){
   const tp=todayPlan(), planned = tp.key && tp.key!=='rest';
   const plan = planned? {key:tp.key} : nextPlan();
-  return `<h2>Start workout?</h2>
+  const seg = `<div class="seg"><button class="${startMode==='gym'?'on':''}" data-act="startMode" data-v="gym">🏋️ Gym workout</button><button class="${startMode==='act'?'on':''}" data-act="startMode" data-v="act">⛳ Other activity</button></div>`;
+  if(startMode==='act'){
+    const recent=[...new Set(sortSessions(S.sessions.filter(s=>s.activity)).reverse().map(s=>s.activity))].slice(0,6);
+    return `<h2>Log an activity</h2>${seg}
+    <p class="small ink2" style="margin-top:0">Golf, swimming, a hike … It shows in your calendar and history but doesn't change your training plan.</p>
+    <label class="f">What did you do?</label><input id="acName" placeholder="e.g. Golf" autocomplete="off">
+    ${recent.length?`<div class="chips" style="margin-top:6px">${recent.map(n=>`<button class="chip" data-act="acPick" data-v="${esc(n)}">${esc(n)}</button>`).join('')}</div>`:''}
+    <label class="f">How long (min)</label><input id="acMin" inputmode="numeric" placeholder="e.g. 90">
+    <label class="f">Finished</label><select id="acAgo"><option value="0">Just now</option>${[15,30,60,120,180,240].map(m=>`<option value="${m}">${m>=60?m/60+' h':m+' min'} ago</option>`).join('')}</select>
+    <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="primary big" data-act="acSave">Save activity</button></div>`;
+  }
+  return `<h2>Start workout?</h2>${seg}
   <label class="f">What are you training today?</label>
   <select id="stKey">${WORKOUTS.map(w=>`<option value="${w.key}" ${w.key===plan.key?'selected':''}>${w.label}${w.key===plan.key?(planned?' (planned today)':' (next in rotation)'):''}</option>`).join('')}</select>
   <p class="small muted" style="margin:4px 0 0">Doing something else than planned is fine: the plan for the coming days adjusts.</p>
@@ -1073,7 +1199,7 @@ function startSheet(){
   <div class="grid2" style="margin-top:16px"><button class="big" data-act="closeModal">Cancel</button><button class="primary big" data-act="startGo">Yes, start</button></div>`;
 }
 function saveWorkout(){
-  const a=A();
+  const a=A(), newV=tplCommit();
   const bwv = num(a.post && a.post.bw); if(bwv) upsertBW(a.date,bwv);
   const prs=[];
   a.exercises.forEach(e=>{ if(!hasWeight(e)) return; const best=Math.max(0,...e.sets.filter(s=>s.done&&!s.warm).map(s=>e1rm(e,s))); const prev=bestE1RM(e.name); if(best>0 && prev>0 && best>prev) prs.push(e.name); });
@@ -1084,7 +1210,7 @@ function saveWorkout(){
   S.sessions.push(ses); S.active=null;
   if(S.healthPending && S.healthPending.target==='active') S.healthPending=null;
   save(); go('today');
-  toast(prs.length? `Saved. New PR: ${prs.join(', ')} 🎉` : 'Workout saved 💪');
+  toast((prs.length? `Saved. New PR: ${prs.join(', ')} 🎉` : 'Workout saved 💪') + (newV? ` · ${keyLabel(ses.tplKey)} v${newV} saved` : ''));
   if(S.settings.icloudAuto) saveToICloud();
 }
 function bestE1RM(name){ let best=0; doneSessions().forEach(ses=>(ses.exercises||[]).forEach(e=>{ if(e.name===name) e.sets.forEach(s=>{ if(s.done) best=Math.max(best,e1rm(e,s)); }); })); return best; }
@@ -1164,11 +1290,11 @@ function viewHistory(){
   const seg = ['all','Push','Legs','Pull','skip'].map(k=>`<button class="${histFilter===k?'on':''}" data-act="histF" data-v="${k}">${k==='all'?'All':k==='skip'?'Skips':k}</button>`).join('');
   const items = list.map(s=>{
     const isSkip=s.status==='skip';
-    const sub = isSkip ? `Skip · ${esc(s.skip?.reason||'')}${s.skip?.instead?' · '+esc(s.skip.instead):''}`
+    const sub = s.activity? `Activity${s.start&&s.end?' · '+fmtDur(s.end-s.start):''}` : isSkip ? `Skip · ${esc(s.skip?.reason||'')}${s.skip?.instead?' · '+esc(s.skip.instead):''}`
       : `${sessionSets(s)} sets · ${fmtNum(sessionVolume(s))} kg${s.end&&s.start?' · '+fmtDur(s.end-s.start):''}${s.stretch?(s.stretch.did?' · stretched':' · no stretch'):''}`;
     return `<div class="list-item" data-act="day" data-v="${s.date}">
-      <span class="dot" style="background:${isSkip?'var(--bad)':`var(--${s.type.toLowerCase()})`}"></span>
-      <div style="flex:1"><div><b>${esc(s.type)}${s.boulder?' + Boulder':''}</b> <span class="muted small">${fmtDate(s.date)} ${s.date.slice(0,4)}</span></div><div class="small ink2">${sub}</div></div>
+      <span class="dot" style="background:${isSkip?'var(--bad)':s.activity?'var(--muted)':`var(--${s.type.toLowerCase()})`}"></span>
+      <div style="flex:1"><div><b>${esc(s.activity||s.type)}${s.boulder?' + Boulder':''}</b> <span class="muted small">${fmtDate(s.date)} ${s.date.slice(0,4)}</span></div><div class="small ink2">${sub}</div></div>
       <span class="muted">›</span></div>`;
   }).join('');
   return `<h1>History</h1>
@@ -1197,7 +1323,7 @@ function recordTimeline(s){
       if(x.warm && j===0) rows.push('<li class="div">Warm-up sets</li>');
       if(!x.warm && !head){ head=true; if(wi) rows.push('<li class="div">Working sets</li>'); }
       if(j) rows.push(`<li class="rst"><div class="rest">Rest <b>${x.pressed?'':'~'}${fmtClock(x.start-timed[j-1].end)}</b></div></li>`);
-      rows.push(`<li class="done"><div class="set rec done"><div class="n">${x.warm?'W'+(++wi):++si}</div><div class="val">${setVal(e,x)}</div><div class="btns"><span class="sdur">${x.est?'~':''}${fmtClock(x.end-x.start)}</span><span class="okm">✓</span></div></div></li>`);
+      rows.push(`<li class="done"><div class="set rec done"><div class="n">${x.warm?'W'+(++wi):++si}</div><div class="val">${setVal(e,x)}</div><div class="btns"><span class="sdur">${x.est?'~':''}${fmtClock(x.end-x.start)}${perRep(e,x)}</span><span class="okm">✓</span></div></div></li>`);
     });
     const n=exs[i+1]; if(e.end && n && n.arrived){ mv+=Math.max(0, n.arrived-e.end); rows.push(`<li class="mvl"><div class="mvrow">Moving <b>${fmtClock(n.arrived-e.end)}</b></div></li>`); }
   });
@@ -1215,6 +1341,10 @@ function sessionDetail(s){
       <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete entry</button></div>`;
   }
   const p=s.pre||{}, q=s.post||{}, h=s.health;
+  if(s.activity) return `<div class="card"><h2>${esc(s.activity)} <span class="pill">activity</span></h2>
+    <div class="small ink2">${s.start&&s.end?`${fmtTime(s.start)}–${fmtTime(s.end)} · ${fmtDur(s.end-s.start)}`:'No time given'}</div>
+    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : (s.start&&s.end? `<button class="ghost big" style="margin-top:8px" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>`:'')}
+    <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete activity</button></div>`;
   const exs = (s.exercises||[]).some(e=>e.arrived)? recordTimeline(s) : (s.exercises||[]).map(e=>{
     const prev = prevOccurrence(e.name, s);
     const d = prev && !e.skipped && e.sets.length? topVal(e)-topVal(prev) : null;
@@ -1245,7 +1375,8 @@ function daySheet(date){
   let planHtml = mv? `<div class="card" style="border-color:var(--warn)"><h3>↔ Moved workout</h3>
     <p class="small ink2" style="margin:0">Training moved from <b>${fmtDate(mv.from)}</b> to <b>${fmtDate(mv.to)}</b>${mv.ok===false?' (more days in a row than your limit)':''}.</p>
     <button class="link" data-act="undoMove" data-v="${mv.id}">Undo move</button></div>` : '';
-  if(date>=today && !list.length && !(mv && mv.from===date)){
+  const gymList = list.filter(isGym);
+  if(date>=today && !gymList.length && !(mv && mv.from===date)){
     const pin = S.planPins[date]==='train'? '' : S.planPins[date], auto = autoKeyFor(date);
     const opts = [['', `Auto${auto?' ('+keyLabel(auto)+')':''}`], ...PLAN_KEYS.map(k=>[k,keyLabel(k)]), ['rest','Rest']];
     const p = planFor(date);
@@ -1253,7 +1384,7 @@ function daySheet(date){
       <div class="chips">${opts.map(([k,l])=>`<button class="chip ${(pin||'')===k?'on':''}" data-act="pin" data-d="${date}" data-v="${k}">${k?'📌 ':''}${esc(l)}</button>`).join('')}</div>
       <p class="small muted" style="margin:8px 0 0">${pin? 'Fixed: this day keeps this plan, whatever happens before it.' : 'Auto follows your split and shifts when you skip or train something else.'}</p>
       ${p && p.key && p.key!=='rest' && !mv? `<button class="big mvbtn" style="margin-top:8px" data-act="moveOpen" data-v="${date}">↔ Move this workout to a rest day</button>` : ''}</div>`;
-  } else if(date<today && !list.length && unaccountedDays().includes(date)){
+  } else if(date<today && !gymList.length && unaccountedDays().includes(date)){
     planHtml += `<div class="card" style="border-color:var(--warn)"><h3>Planned training, nothing logged</h3><div class="grid3">
       <button class="no" data-act="missSkip" data-v="${date}">Skipped</button><button data-act="manualOpen" data-v="${date}">Trained</button><button class="mvbtn" data-act="moveOpen" data-v="${date}">Moved</button></div>
       <button class="link" style="font-size:12px" data-act="missRest" data-v="${date}">It was planned wrong, it was a rest day</button></div>`;
@@ -1300,7 +1431,7 @@ function muscleProgress(from){
 function viewStats(){
   const from = rangeStart();
   const ses = S.sessions.filter(s=>s.date>=from);
-  const done = ses.filter(s=>s.status==='done'), skips = ses.filter(s=>s.status==='skip');
+  const done = ses.filter(s=>s.status==='done' && isGym(s)), skips = ses.filter(s=>s.status==='skip');
   const adher = done.length+skips.length? Math.round(done.length/(done.length+skips.length)*100):0;
   const vol = done.reduce((a,s)=>a+sessionVolume(s),0);
   const seg = [['4w','4 weeks'],['12w','12 weeks'],['all','All']].map(([k,l])=>`<button class="${statsRange===k?'on':''}" data-act="range" data-v="${k}">${l}</button>`).join('');
@@ -1444,14 +1575,67 @@ function mountCharts(){
 }
 
 /* ================= SETTINGS ================= */
-let tplEdit='Push';
+let tplEdit='Push', rotCustom=false;
+// Template editor in Settings: works on a copy (tplEd.t); "Save" makes ONE new version. e._orig = name before editing (for renames).
+let tplEd=null;
+function tplEdStart(){ const t=JSON.parse(JSON.stringify(S.templates[tplEdit])); t.exercises.forEach(e=>e._orig=e.name); tplEd={key:tplEdit, t, changed:false}; }
+function tplEditorHtml(){
+  const t=tplEd.t, v=S.templates[tplEd.key].v||1;
+  const opt=(list,cur)=>list.map(([k,l])=>`<option value="${esc(k)}" ${k===cur?'selected':''}>${esc(l)}</option>`).join('');
+  const exs=t.exercises.map((e,i)=>`<div class="tedit">
+    <div class="row between"><b class="small muted">${i+1}.</b><span class="row" style="gap:4px">
+      <button class="icon" data-act="teMove" data-i="${i}" data-v="-1" ${i?'':'disabled'} aria-label="Earlier">↑</button>
+      <button class="icon" data-act="teMove" data-i="${i}" data-v="1" ${i<t.exercises.length-1?'':'disabled'} aria-label="Later">↓</button>
+      <button class="icon" style="color:var(--bad)" data-act="teDel" data-i="${i}" aria-label="Remove">✕</button></span></div>
+    <label class="f">Name</label><input data-te="${i}" data-k="name" value="${esc(e.name)}">
+    ${e._orig && e._orig!==e.name? `<p class="small" style="color:var(--warn);margin:4px 0 0">Renamed from “${esc(e._orig)}”: history is linked by exact name.</p>`:''}
+    <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" data-te="${i}" data-k="info" placeholder="e.g. Setting 7 · elbows down">${esc(e.info||'')}</textarea>
+    <div class="grid2"><div><label class="f">Type</label><select data-te="${i}" data-k="kind">${opt(Object.entries(KINDS),e.kind)}</select></div>
+      <div><label class="f">Muscle</label><select data-te="${i}" data-k="muscle">${opt(MUSCLES.map(m=>[m,m]),e.muscle)}</select></div></div>
+    <div class="grid3"><div><label class="f">Warm-up sets</label><input inputmode="numeric" data-te="${i}" data-k="warm" value="${e.warm||0}"></div>
+      <div><label class="f">Sets</label><input inputmode="numeric" data-te="${i}" data-k="sets" value="${e.sets}"></div>
+      <div><label class="f">Target</label><input data-te="${i}" data-k="target" value="${esc(e.target)}"></div>
+      <div><label class="f">Rest (s)</label><input inputmode="numeric" data-te="${i}" data-k="rest" value="${e.rest}"></div>
+      <div><label class="f">Start kg</label><input inputmode="decimal" data-te="${i}" data-k="w" value="${e.w?fw(e.w):''}" placeholder="last time"></div></div>
+  </div>`).join('');
+  return `<div class="row between"><h3 style="margin:0">Editing ${esc(keyLabel(tplEd.key))} (v${v} → v${v+1})</h3></div>
+    <label class="f">Warm-up (new lines allowed)</label><textarea class="auto" rows="1" data-te="wu" data-k="text">${esc(t.warmup.text||'')}</textarea>
+    <label class="f">Warm-up minutes</label><input inputmode="numeric" data-te="wu" data-k="minutes" value="${t.warmup.minutes||0}">
+    ${exs||'<div class="empty">No exercises.</div>'}
+    <button class="ghost big" style="margin-top:10px" data-act="teAdd">+ Add exercise</button>
+    <div class="grid2" style="margin-top:10px"><button class="big" data-act="teCancel">Cancel</button><button class="primary big" data-act="teSave">Save as v${v+1}</button></div>
+    <p class="small muted">v${v} stays in the version list. Same name in two workouts = same exercise history.</p>`;
+}
+function tplEdInput(t){
+  const i=t.dataset.te, k=t.dataset.k, tp=tplEd.t; tplEd.changed=true;
+  if(i==='wu'){ tp.warmup[k] = k==='minutes'? Math.max(0,parseInt(t.value)||0) : t.value; return; }
+  const e=tp.exercises[+i]; if(!e) return;
+  if(['warm','rest'].includes(k)) e[k]=Math.max(0,parseInt(t.value)||0);
+  else if(k==='sets') e[k]=Math.max(1,parseInt(t.value)||1);
+  else if(k==='w') e[k]=num(t.value);
+  else e[k]=t.value;
+}
+function tplEdSave(){
+  const key=tplEd.key, tp=tplEd.t;
+  if(tp.exercises.some(e=>!String(e.name).trim())){ toast('Every exercise needs a name'); return; }
+  const renames=tp.exercises.filter(e=>e._orig && e._orig!==e.name.trim()).map(e=>[e._orig, e.name.trim()]);
+  tp.exercises.forEach(e=>{ e.name=String(e.name).trim(); e.info=String(e.info||'').trim(); delete e._orig; });
+  tplChange(key, 'Edited in Settings', t=>{ t.warmup={text:String(tp.warmup.text||'').trim(), minutes:tp.warmup.minutes||0}; t.exercises=tp.exercises; });
+  // keep shared exercises linked: offer to rename them in the other workouts too
+  renames.forEach(([o,n])=>{ const others=Object.keys(S.templates).filter(k=>k!==key && S.templates[k].exercises.some(x=>x.name===o));
+    if(others.length && confirm(`“${o}” is also in ${others.map(keyLabel).join(', ')}. Rename it there too, so it stays one exercise with one history?`))
+      others.forEach(k=>tplChange(k, `Renamed “${o}” → “${n}”`, t=>t.exercises.forEach(x=>{ if(x.name===o) x.name=n; }))); });
+  tplEd=null; save(); render(); toast(`${keyLabel(key)} v${S.templates[key].v} is in use now`);
+}
+function autoGrow(el){ el.style.height='auto'; el.style.height=(el.scrollHeight+2)+'px'; }
+function growAll(root){ (root||document).querySelectorAll('textarea.auto').forEach(autoGrow); }
 function viewSettings(){
   const st=S.settings, tpl=S.templates[tplEdit];
   const tabs=WORKOUTS.map(w=>`<button class="${tplEdit===w.key?'on':''}" data-act="tplTab" data-v="${w.key}">${w.key==='PullBoulder'?'Boulder':w.label}</button>`).join('');
   const vers=(S.tplHistory[tplEdit]||[]).slice().reverse();
   const rows=tpl.exercises.map((e,i)=>`<div class="list-item" style="display:block;padding:8px 0">
     <div class="row between"><b>${i+1}. ${esc(e.name)}</b><span class="small muted">${esc(e.muscle||'')}</span></div>
-    ${e.info?`<div class="small ink2">ⓘ ${esc(e.info)}</div>`:''}
+    ${e.info?`<div class="small ink2 pre">ⓘ ${esc(e.info)}</div>`:''}
     <div class="small muted">${e.warm?e.warm+' warm-up + ':''}${e.sets} × ${esc(e.target)} · ${esc(KINDS[e.kind]||e.kind)} · rest ${e.rest} s${e.w?' · start '+fw(e.w)+' kg':''}</div></div>`).join('');
   return `<h1>Settings</h1>
   <div class="card"><h2>Profile</h2>
@@ -1460,11 +1644,11 @@ function viewSettings(){
   <div class="card"><h2>Training plan</h2>
     <label class="f">Split (repeats on your training days)</label>
     <div class="chips">${SPLIT_PRESETS.map(p=>`<button class="chip ${p.order.join()===st.rotation.join()?'on':''}" data-act="splitPreset" data-v="${p.order.join(',')}">${esc(p.label)}</button>`).join('')}
-      <span class="chip ${SPLIT_PRESETS.some(p=>p.order.join()===st.rotation.join())?'':'on'}" style="opacity:.8">Custom</span></div>
-    <div style="margin-top:8px">${st.rotation.map((t,i)=>`<div class="row" style="margin-top:6px"><span class="small muted" style="width:18px">${i+1}.</span>
+      <button class="chip ${rotCustom||!SPLIT_PRESETS.some(p=>p.order.join()===st.rotation.join())?'on':''}" data-act="splitCustom">Custom</button></div>
+    ${rotCustom||!SPLIT_PRESETS.some(p=>p.order.join()===st.rotation.join())? `<div style="margin-top:8px">${st.rotation.map((t,i)=>`<div class="row" style="margin-top:6px"><span class="small muted" style="width:18px">${i+1}.</span>
       <select data-rot="${i}">${TYPES.map(x=>`<option ${x===t?'selected':''}>${x}</option>`).join('')}</select>
       <button class="icon" data-act="rotUp" data-i="${i}">↑</button>${st.rotation.length>1?`<button class="icon" data-act="rotDel" data-i="${i}" style="color:var(--bad)">✕</button>`:''}</div>`).join('')}
-      <button class="small ghost" style="margin-top:8px" data-act="rotAdd">+ Add day to split</button></div>
+      <button class="small ghost" style="margin-top:8px" data-act="rotAdd">+ Add day to split</button></div>` : ''}
     <p class="small ink2">${st.rotation.map(esc).join(' → ')} → ${esc(st.rotation[0])} → …</p>
     <label class="f">Training days</label>
     <div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${!st.restDays.includes(d)?'on':''}" data-act="restDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>
@@ -1481,17 +1665,21 @@ function viewSettings(){
   </div>
   <div class="card"><h2>General</h2>
     <label class="f">Weight step for +/− buttons (kg)</label><input data-set="step" inputmode="decimal" value="${fw(st.step)}">
+    <label class="f">Weight increase when all sets hit the top of the rep range (kg)</label><input data-set="progStep" inputmode="decimal" value="${fw(st.progStep)}">
+    <label class="f">Keep the screen on during a workout</label>
+    <div class="chips"><button class="chip ${st.keepAwake?'on':''}" data-act="keepAwake" data-v="1">On</button><button class="chip ${!st.keepAwake?'on':''}" data-act="keepAwake" data-v="0">Off</button></div>
+    <p class="small muted" style="margin:4px 0 0">So you don't have to unlock the phone between sets.</p>
     <label class="f">Rest-timer sound</label>
     <div class="chips"><button class="chip ${st.sound?'on':''}" data-act="sound" data-v="1">On</button><button class="chip ${!st.sound?'on':''}" data-act="sound" data-v="0">Off</button></div>
     <label class="f">Theme</label>
     <div class="chips">${['auto','light','dark'].map(t=>`<button class="chip ${st.theme===t?'on':''}" data-act="theme" data-v="${t}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}</div>
   </div>
   <div class="card"><h2>Workout templates</h2>
-    <p class="small ink2" style="margin-top:0">Read-only here. Change a template during a workout with ⚙ on an exercise (or Add). Every change saves a new version and the older ones stay below.</p>
+    <p class="small ink2" style="margin-top:0">Tap ✎ Edit to change a workout here, or use ⚙ / ＋ during a workout. Every saved change is a new version; the older ones stay below.</p>
     <div class="seg">${tabs}</div>
-    <div class="row between"><h3 style="margin:0">${esc(keyLabel(tplEdit))} v${tpl.v||1}</h3><span class="pill" style="color:var(--accent)">in use</span></div>
-    <p class="small ink2" style="margin:4px 0 0"><b>Warm-up</b> (${tpl.warmup.minutes||0} min): ${esc(tpl.warmup.text)||'—'}</p>
-    ${rows||'<div class="empty">No exercises.</div>'}
+    ${tplEd? tplEditorHtml() : `<div class="row between"><h3 style="margin:0">${esc(keyLabel(tplEdit))} v${tpl.v||1} <span class="pill" style="color:var(--accent)">in use</span></h3><button class="soft" data-act="teStart">✎ Edit</button></div>
+    <p class="small ink2 pre" style="margin:4px 0 0"><b>Warm-up</b> (${tpl.warmup.minutes||0} min): ${esc(tpl.warmup.text)||'—'}</p>
+    ${rows||'<div class="empty">No exercises.</div>'}`}
     <h3 style="margin-top:14px">Versions</h3>
     ${vers.map(h=>`<div class="list-item"><b style="min-width:30px">v${h.v}</b><div style="flex:1;min-width:0"><div class="small">${esc(h.note||'')}</div><div class="small muted">${new Date(h.at).toLocaleString('de-CH',{dateStyle:'short',timeStyle:'short'})} · ${h.tpl.exercises.length} exercises</div></div>
       ${h.v===(tpl.v||1)?'<span class="pill">in use</span>':`<button class="small" data-act="tplUse" data-v="${h.v}">Use again</button>`}</div>`).join('')}
@@ -1528,7 +1716,7 @@ function viewSettings(){
         <li><b>Find Health Samples</b>: Type <i>Steps</i>, Start Date is between <code>Start</code> and <code>End</code> → <b>Calculate Statistics</b> Sum → <b>Set Variable</b> <code>Steps</code></li>
         <li>Same for <i>Active Energy</i> → Sum → <code>Kcal</code></li>
         <li>Same for <i>Heart Rate</i> → Average → <code>HRavg</code>, and Maximum → <code>HRmax</code></li>
-        <li><b>Dictionary</b> with keys <code>steps</code>, <code>kcal</code>, <code>hrAvg</code>, <code>hrMax</code> = those variables → <b>Copy to Clipboard</b></li>
+        <li><b>Text</b> action with four lines: <code>steps=</code><i>Steps</i>, <code>kcal=</code><i>Kcal</i>, <code>hrAvg=</code><i>HRavg</i>, <code>hrMax=</code><i>HRmax</i> → <b>Copy to Clipboard</b>. (Use Text, not Dictionary: a copied Dictionary arrives empty in the app.)</li>
         <li>Back in the app, tap <b>Paste Apple Health result</b>. Allow Health access on the first run.</li>
       </ol></details>
   </div>
@@ -1563,7 +1751,8 @@ const updateBanner = () => window.GymLoader && GymLoader.updateReady && S.profil
 // Tree: sections → topics. "where" tells the user where to find it in the app.
 const MANUAL = [
   {id:'start', title:'🏠 Today', items:[
-    {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Below: the calendar for this and next week, your skip counter and bodyweight.'},
+    {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Once you trained today, the big title is your NEXT workout with its day (e.g. "Push – On Thursday"), and only a small "+ Another workout or activity" link stays. Below: the calendar for this and next week, your skip counter and bodyweight. Pull down at the top to refresh (also checks for a new version).'},
+    {id:'activity', title:'Other activities (golf, swimming …)', where:'Start workout → ⛳ Other activity', text:'Log anything that is not a gym workout: name, minutes, when you finished. It shows as ○ in the calendar and in History (with Apple Health data if you like), but never changes your training plan or counts as a planned workout.'},
     {id:'cal2w', title:'2-week calendar', where:'Today → This & next week', text:'Green = trained, red = skipped, amber ↔ = moved, dashed outline = planned (upcoming), red dashed "LOG" = planned training day in the past without an entry. 📌 = day fixed by hand. Tap any day to see, plan, move or log it. "📅 Month" opens the month view.'},
     {id:'tolog', title:'"To log" days (red dashed)', where:'Today → "days to log" card · calendars', text:'Every past training day of your plan needs an entry: Workout, Skip or Moved. Until then it is marked red dashed with "LOG". This starts at your first ever entry, so the past always adds up. If the plan itself was wrong, choose "it was a rest day".'},
     {id:'bw', title:'Bodyweight', where:'Today → Bodyweight', text:'Enter your weight; the chart is in Stats. Bodyweight exercises (pull-ups, dips) use it for the total kg.'},
@@ -1580,13 +1769,14 @@ const MANUAL = [
   ]},
   {id:'wo', title:'🏋️ Workout', items:[
     {id:'startwo', title:'Start a workout', where:'Today → Start workout', text:'Choose what you train (planned one is preselected) and when you started (now or X min ago).'},
-    {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'Warm-up first, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. ‹ top left goes back in one tap. "Back to current" returns to where you are.'},
-    {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it.'},
+    {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'Warm-up first, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. "Previous" only appears while you pull down at the top. ‹ top left goes back in one tap. "Back to current" returns to where you are. The screen stays on during a workout (Settings → General).'},
+    {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it. A done set shows its time and seconds per rep (e.g. 4s/rep). "+ Add a set" works also after the exercise is finished: it brings you back to it.'},
+    {id:'prog', title:'Go heavier (progression hint)', where:'Workout → under the exercise name', text:'If last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12), a green hint suggests more weight. Tap it to put +1 kg (changeable in Settings → General) on all working sets.'},
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
     {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙.'},
     {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
-    {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info line under the name, warm-up sets, working sets, target and rest. "This workout only" or "Also update template": the current template version is kept and the new one is used from now on. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
+    {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info under the name (several lines possible), warm-up sets, working sets, target and rest. "This workout only" or "Also update template": today\'s workout uses the change right away, and all template changes of one workout become ONE new version when the workout ends. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
     {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: ticked sets still count, moving starts.'},
     {id:'earlier', title:'Warm-up finished earlier…', where:'Workout → warm-up', text:'Forgot to tap "Warm-up done"? Pick how many minutes ago. Stretching has the same option.'},
     {id:'endearly', title:'End workout early', where:'Workout → bottom of the exercise', text:'Ends the workout (with "finished X min ago"). The exercise you are at counts with its ticked sets, the remaining ones are marked as skipped.'},
@@ -1613,12 +1803,12 @@ const MANUAL = [
     {id:'restore', title:'Restore / new phone', where:'Welcome screen or Settings → Restore from data.json', text:'Pick data.json (or a dated backup). Replaces the data on this device.'},
   ]},
   {id:'health', title:'❤️ Apple Health', items:[
-    {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". Calories and heart rate need the Apple Watch. Setup in Settings → Apple Health.'},
+    {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". If the clipboard can\'t be read, a box opens: long-press → Paste → Add. The Shortcut must copy TEXT (steps=…, kcal=…, hrAvg=…, hrMax=…), not a Dictionary. Calories and heart rate need the Apple Watch. Setup in Settings → Apple Health.'},
   ]},
   {id:'app', title:'⚙️ App & updates', items:[
     {id:'upd', title:'Updates & ⟳ Refresh', where:'Settings → App version · banner "New version available"', text:'The app checks for a new version on every start. When one is found, tap "⟳ Refresh". Your data and a running workout stay. Works offline with the last version.'},
     {id:'rollback', title:'Go back to the previous version', where:'Settings → App version', text:'If a new version misbehaves, go back; updates pause until you resume them.'},
-    {id:'templates', title:'Templates & versions', where:'Settings → Workout templates', text:'Read-only list of each workout\'s exercises and all its versions. Templates change only during a workout (⚙ / Add), each change is a new version, and "Use again" brings an older one back as a new version. "Paste a template" turns a copied template text into a new version.'},
+    {id:'templates', title:'Templates & versions', where:'Settings → Workout templates', text:'Each workout\'s exercises and all its versions. ✎ Edit changes warm-up and exercises (name, info, type, muscle, sets, target, rest, start kg, order, remove, add); Save makes one new version. Renaming an exercise that is also in another workout offers to rename it there too, so the history stays linked. Changes during a workout (⚙ / Add) become one version at the end of the workout. "Use again" brings an older version back; "Paste a template" turns a copied template text into a new version.'},
     {id:'wizardagain', title:'Welcome wizard again', where:'Settings → Profile', text:'Runs the setup again (name, plan, backup). Your data stays.'},
   ]},
 ];
@@ -1647,8 +1837,8 @@ function openManual(focus){
 }
 
 /* ================= modal ================= */
-function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; }
-function closeModal(){ $('#modal').innerHTML=''; dayOpen=null; }
+function openModal(html){ $('#modal').innerHTML=`<div class="modal" data-act="modalBg"><div class="sheet">${html}</div></div>`; growAll($('#modal')); }
+function closeModal(){ if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); $('#modal').innerHTML=''; dayOpen=null; woPull=null; }
 
 /* ================= events ================= */
 document.addEventListener('click', ev=>{
@@ -1665,7 +1855,13 @@ document.addEventListener('click', ev=>{
     case 'bkTest': backupTest(); break;
     case 'bkVerify': $('#verifyFile').click(); break;
     // today
-    case 'startOpen': if(S.active){ go('workout'); break; } openModal(startSheet()); break;
+    case 'startOpen': if(S.active){ go('workout'); break; } startMode='gym'; openModal(startSheet()); break;
+    case 'startMode': startMode=v; openModal(startSheet()); break;
+    case 'acPick': $('#acName').value=v; break;
+    case 'acSave': { const name=$('#acName').value.trim(), min=Math.max(0,parseInt($('#acMin').value)||0); if(!name){ toast('What did you do?'); break; }
+      const end=Date.now()-(+$('#acAgo').value)*60000, start=min? end-min*60000 : null;
+      S.sessions.push({id:uid(), date:iso(new Date(start||end)), type:'Other', activity:name, status:'done', start, end:start?end:null, exercises:[], notes:''});
+      save(); closeModal(); render(); toast(`${name} saved`); if(S.settings.icloudAuto) saveToICloud(); break; }
     case 'startGo': startWorkout($('#stKey').value, +$('#stAgo').value); break;
     case 'skipOpen': { const tp=todayPlan(); skipDraft=newDraft(tp.key && tp.key!=='rest'? {type:keyType(tp.key)} : {}); openModal(skipSheet()); break; }
     case 'missSkip': skipDraft=newDraft({mode:'skip', showMode:true, date:v}); openModal(skipSheet()); break;
@@ -1711,6 +1907,13 @@ document.addEventListener('click', ev=>{
       woFocus=si; save(); render(); break; }
     case 'setFocus': { if(ev.target.closest('input,.edit')) break; const si=+t.dataset.s; woFocus = woFocus===si? -1 : si; render(); break; }
     case 'setStart': startSet(+t.dataset.s); save(); render(); break;
+    case 'progApply': { const e=viewEx(), ph=progressHint(e); if(!ph) break; e.sets.forEach(x=>{ if(!x.warm && !x.end) x.w=ph.to; });
+      const fi=e.sets.findIndex(x=>!x.warm); if(fi>=0) syncWarm(e, fi); save(); render(); toast(`Working sets now ${fw(ph.to)} kg`); break; }
+    case 'setAdd': { const e=viewEx(), w=e.sets.filter(x=>!x.warm), l=w[w.length-1]||e.sets[e.sets.length-1]||{w:'',r:''};
+      e.sets.push(newSet(l.w, l.r, false));
+      // adding a set to the exercise you just finished brings you back to it
+      if(e===curEx() && W.moving && !e.skipped){ W.moving=null; e.left=null; }
+      woFocus=e.sets.length-1; save(); render(); break; }
     case 'setCheck': checkSet(+t.dataset.s); save(); render(); break;
     case 'warmupDone': warmupDone(Date.now()); break;
     case 'arrive': arrive(); break;
@@ -1722,11 +1925,11 @@ document.addEventListener('click', ev=>{
     case 'wuGear': openModal(wuGearSheet()); break;
     case 'wuSave': { const text=$('#wuText').value.trim(), minutes=Math.max(0,parseInt($('#wuMin').value)||0);
       Object.assign(W.warmup, {text, minutes});
-      if(v==='tpl'){ tplChange(W.key, 'Changed warm-up', tp=>{ tp.warmup={text, minutes}; }); toast(`${keyLabel(W.key)} v${S.templates[W.key].v} is in use now`); } else toast('Changed for this workout only');
+      if(v==='tpl'){ tplChange(W.key, 'Changed warm-up', tp=>{ tp.warmup={text, minutes}; }); toast(tplPendingNote()); } else toast('Changed for this workout only');
       save(); closeModal(); render(); break; }
     case 'gearSave': gearSave(v==='tpl'); save(); closeModal(); render(); break;
     case 'gearRemove': { const e=viewEx(); if(confirm(`Remove “${e.tplName}” from the ${keyLabel(W.key)} template? This saves a new version; the old one stays in Settings. It stays in today's workout.`)){
-      tplChange(W.key, `Removed “${e.tplName}”`, tp=>{ tp.exercises=tp.exercises.filter(x=>x.name!==e.tplName); }); save(); closeModal(); render(); toast(`${keyLabel(W.key)} v${S.templates[W.key].v} is in use now`); } break; }
+      tplChange(W.key, `Removed “${e.tplName}”`, tp=>{ tp.exercises=tp.exercises.filter(x=>x.name!==e.tplName); }); save(); closeModal(); render(); toast(tplPendingNote()); } break; }
     case 'exMoveOpen': openModal(exMoveSheet()); break;
     case 'exUp': case 'exDown': { const i=+t.dataset.i, j=a==='exUp'? i-1 : i+1, L=W.exercises;
       if(j>W.idx && j<L.length && !L[j].arrived){ [L[i],L[j]]=[L[j],L[i]]; save(); openModal(exMoveSheet()); render(); } break; }
@@ -1734,7 +1937,7 @@ document.addEventListener('click', ev=>{
     case 'exAddOpen': openModal(exAddSheet()); break;
     case 'exAdd': { const g=id=>$('#'+id).value.trim(); const name=g('aName'); if(!name){ toast('Enter a name'); break; }
       const tpl={name, info:g('aInfo'), kind:g('aKind'), muscle:g('aMuscle'), sets:Math.max(1,parseInt(g('aSets'))||3), target:g('aR')||'10', rest:Math.max(0,parseInt(g('aRest'))||0), warm:g('aKind')==='w'? 1 : 0, w:num(g('aW'))};
-      exAddOne(tpl, v==='tpl'); save(); closeModal(); render(); toast(v==='tpl'? `Added. ${keyLabel(W.key)} v${S.templates[W.key].v} is in use now.` : 'Added after the current exercise'); break; }
+      exAddOne(tpl, v==='tpl'); save(); closeModal(); render(); toast(v==='tpl'? 'Added. '+tplPendingNote() : 'Added after the current exercise'); break; }
     case 'exSkipOpen': openModal(exSkipSheet()); break;
     case 'exSkip': leaveExercise(Date.now(), true); save(); closeModal(); render(); break;
     case 'wipSnap': W.lastSnap=Date.now(); save(false); saveToICloud(); render(); break;
@@ -1750,11 +1953,12 @@ document.addEventListener('click', ev=>{
     case 'stretchDone': W.stretch.end=Date.now(); W.stage='context'; save(); render(); break;
     case 'ctx': W.context=v; W.stage='final'; save(); window.scrollTo(0,0); render(); break;
     case 'saveWorkout': saveWorkout(); break;
-    case 'discard': if(confirm('Discard this workout? Nothing will be saved.')){ S.active=null; save(); go('today'); } break;
+    case 'discard': if(confirm('Discard this workout? No sets will be saved.'+(W.tplDraft?' Your template changes are kept as a new version.':''))){ tplCommit(); S.active=null; save(); go('today'); } break;
     // health
     case 'healthActive': requestHealth('active', W.start, W.end||Date.now()); break;
     case 'healthSes': { const s=S.sessions.find(x=>x.id===t.dataset.id); if(s) requestHealth(s.id, s.start, s.end); break; }
     case 'healthPaste': pasteHealth(); break;
+    case 'healthManual': try{ applyHealth($('#hlTxt').value); }catch(e){ toast('Could not read it: '+e.message); } break;
     // history
     case 'day': dayOpen=v; openModal(daySheet(v)); break;
     case 'monthView': calMonth = iso().slice(0,7); go('stats'); break;
@@ -1768,14 +1972,22 @@ document.addEventListener('click', ev=>{
     case 'skipAdv': S.settings.skipAdvances = v==='1'; save(); render(); break;
     case 'maxRow': S.settings.maxInRow = +v; save(); render(); break;
     case 'boulder2': S.settings.boulderEvery2nd = v==='1'; save(); render(); break;
-    case 'splitPreset': S.settings.rotation = v.split(','); S.settings.nextOverride=null; save(); render(); toast('Split: '+S.settings.rotation.join(' → ')); break;
+    case 'splitCustom': rotCustom=true; render(); break;
+    case 'splitPreset': rotCustom=false; S.settings.rotation = v.split(','); S.settings.nextOverride=null; save(); render(); toast('Split: '+S.settings.rotation.join(' → ')); break;
     case 'rotUp': { const i=+t.dataset.i, r=S.settings.rotation; if(i>0){ [r[i-1],r[i]]=[r[i],r[i-1]]; save(); render(); } break; }
     case 'rotDel': if(S.settings.rotation.length>1){ S.settings.rotation.splice(+t.dataset.i,1); save(); render(); } break;
     case 'rotAdd': S.settings.rotation.push(TYPES.find(x=>!S.settings.rotation.includes(x))||'Push'); save(); render(); break;
     case 'clearPins': if(confirm('Remove all upcoming fixed days? They go back to automatic.')){ Object.keys(S.planPins).forEach(d=>{ if(d>=iso()) delete S.planPins[d]; }); save(); render(); } break;
     case 'sound': S.settings.sound = v==='1'; save(); render(); break;
+    case 'keepAwake': S.settings.keepAwake = v==='1'; save(); render(); break;
     case 'theme': S.settings.theme=v; save(); render(); break;
-    case 'tplTab': tplEdit=v; render(); break;
+    case 'tplTab': if(tplEd && tplEd.changed && !confirm('Discard your unsaved template changes?')) break; tplEd=null; tplEdit=v; render(); break;
+    case 'teStart': tplEdStart(); render(); break;
+    case 'teCancel': if(tplEd && tplEd.changed && !confirm('Discard your changes?')) break; tplEd=null; render(); break;
+    case 'teSave': tplEdSave(); break;
+    case 'teAdd': tplEd.t.exercises.push({name:'New exercise', kind:'w', sets:3, target:'8-12', rest:S.settings.defaultRest, muscle:'Other', info:'', warm:1}); tplEd.changed=true; render(); break;
+    case 'teDel': { const i=+t.dataset.i, e=tplEd.t.exercises[i]; if(confirm(`Remove “${e.name}” from this workout?`)){ tplEd.t.exercises.splice(i,1); tplEd.changed=true; render(); } break; }
+    case 'teMove': { const i=+t.dataset.i, j=i+(+v), L=tplEd.t.exercises; if(j>=0 && j<L.length){ [L[i],L[j]]=[L[j],L[i]]; tplEd.changed=true; render(); } break; }
     case 'tplUse': { const h=(S.tplHistory[tplEdit]||[]).find(x=>x.v===+v); if(h && confirm(`Use ${keyLabel(tplEdit)} v${h.v} again? This saves it as a new version; the current one stays in the list.`)){
       tplChange(tplEdit, `Back to v${h.v}`, tp=>{ const c=JSON.parse(JSON.stringify(h.tpl)); tp.warmup=c.warmup; tp.exercises=c.exercises; }); save(); render(); toast(`${keyLabel(tplEdit)} v${S.templates[tplEdit].v} is in use now`); } break; }
     case 'tplPaste': tplPaste(); break;
@@ -1797,6 +2009,8 @@ document.addEventListener('click', ev=>{
 });
 document.addEventListener('input', ev=>{
   const t=ev.target, W=S.active;
+  if(t.matches && t.matches('textarea.auto')) autoGrow(t);
+  if(t.dataset.te!=null && tplEd){ tplEdInput(t); return; }
   if(t.id==='manQ'){ manualQuery=t.value; const tmp=document.createElement('div'); tmp.innerHTML=manualSheet(); $('#manTree').innerHTML=tmp.querySelector('#manTree').innerHTML; return; }
   if(t.dataset.in && W){ const e=viewEx(), si=+t.dataset.s, k=t.dataset.in, old=e.sets[si][k];
     e.sets[si][k]=t.value;
@@ -1807,10 +2021,11 @@ document.addEventListener('input', ev=>{
   else if(t.dataset.post && W){ W.post=W.post||{}; W.post[t.dataset.post]=t.value; save(); }
   else if(t.hasAttribute('data-notes') && W){ W.notes=t.value; save(); }
   else if(t.dataset.prof){ S.profile[t.dataset.prof]=t.value; save(); }
-  else if(t.dataset.set){ S.settings[t.dataset.set] = t.dataset.set==='step'? (num(t.value)||0.25) : t.value; save(false); }
+  else if(t.dataset.set){ const k=t.dataset.set; S.settings[k] = k==='step'? (num(t.value)||0.25) : k==='progStep'? (num(t.value)||1) : t.value; save(false); }
 });
 document.addEventListener('change', ev=>{
   const t=ev.target;
+  if(t.dataset.te!=null && tplEd){ tplEdInput(t); if(t.tagName==='SELECT') render(); return; }
   if(t.id==='exSel'){ statsEx=t.value; render(); }
   if(t.dataset.rot!=null){ S.settings.rotation[+t.dataset.rot]=t.value; S.settings.nextOverride=null; save(); render(); }
   if((t.id==='importFile' || t.id==='verifyFile') && t.files[0]){
@@ -1830,7 +2045,8 @@ async function exportData(){
   const a=document.createElement('a'); a.href=URL.createObjectURL(file); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 // Coming back from the Shortcuts app: reload state from storage and refresh (unless a sheet is open)
-document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else tick(); } });
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else tick(); } wakeSync(); });
+document.addEventListener('touchcancel',()=>{ woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
 
 render();
 window.__gymBooted = true; // tells the loader this version started fine
