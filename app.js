@@ -66,11 +66,13 @@ function defaultState(){
     settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(), maxInRow:0,
       defaultRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
       step:0.25, progStep:1, keepAwake:true, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
-      backupToken:null, backupVerified:0, workTrack:true, workDays:[1,2,3,4,5], workSince:localToday() },
+      backupToken:null, backupVerified:0, workTrack:true, workDays:[1,2,3,4,5], workSince:localToday(),
+      wUrl:'', wKey:'', wPush:false },
     templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)), tplHistory: {},
     planPins: {}, moves: [],
     sessions: [], bodyweight: [], active: null, healthPending: null, lastChange: 0,
     work: {}, // date → {h: hours (decimal), src: what was typed, e.g. "7-17"}
+    wAck: 0,  // last home-screen button press (op id) already applied
   };
 }
 function load(){
@@ -166,7 +168,117 @@ function tplCommit(){
 }
 const tplPendingNote = () => { const a=S.active; return a && a.tplDraft? `${keyLabel(a.key)} v${(S.templates[a.key].v||1)+1} is saved when the workout ends` : ''; };
 let S = load();
-function save(touch=true){ if(touch) S.lastChange=Date.now(); try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('Could not save: '+e.message); } }
+function save(touch=true){ if(touch) S.lastChange=Date.now(); try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('Could not save: '+e.message); } wSync(); }
+
+/* ---- Home-screen buttons: your own Cloudflare server (widget/worker.js) ----
+   The app sends the current exercise on every change (wSnap → POST /state). The Shortcut buttons "Gym Next" /
+   "Gym Status" call the server, which stores each press as an op; the app applies them with their exact time
+   when it is opened again (wPull) and acknowledges them (wAck). The server also sends the rest notifications
+   (10 s before the end and at the end) as Web Push, unless the app is open (/fg). */
+var wTimer=null, wLastSent='', wFgAt=0;
+function wOn(){ try{ return !!(S.settings.wUrl && S.settings.wKey); }catch(e){ return false; } }
+function wApi(path, body){
+  const u = S.settings.wUrl.trim().replace(/\/+$/,'') + path + '?k=' + encodeURIComponent(S.settings.wKey.trim());
+  return fetch(u, body===undefined? {cache:'no-store'} : {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body), keepalive:true});
+}
+// one exercise as the server sees it (u = unit after the reps)
+function wEx(e, i){
+  const u = e.kind==='time'? ' s' : e.kind==='dur'? ' min' : '';
+  return {exIdx:i, name:e.name, rest:e.rest||0,
+    sets:e.sets.map(x=>({w:hasWeight(e)? num(x.w) : 0, r:String(x.r??''), u, warm:!!x.warm, start:x.start||null, end:x.end||null}))};
+}
+function wSnap(){
+  const a=S.active;
+  if(!a) return {mode:'none'};
+  // exercises still to come, in the order "I'm at the machine" takes them (same rule as nextExIdx)
+  const queue=a.exercises.map((e,i)=>[e,i]).filter(([e,i])=>i>a.idx && !e.arrived && !e.skipped).map(([e,i])=>wEx(e,i));
+  const b={wid:a.id, queue};
+  if(a.stage==='checkin') return {...b, mode:'checkin'};
+  if(a.stage==='stretch') return {...b, mode:'stretch'};
+  if(a.stage==='stretching') return {...b, mode:'stretching', since:a.stretch.start};
+  if(a.stage!=='steps') return {...b, mode:'after'};
+  if(a.idx<0 && !a.warmup.end) return {...b, mode:'warmup', since:a.warmup.start};
+  const e=curEx();
+  if(a.moving || !e) return {...b, mode:'moving', since:a.moving||a.warmup.end};
+  return {...b, mode:'ex', ...wEx(e, a.idx)};
+}
+function wSync(){
+  if(!wOn()) return;
+  clearTimeout(wTimer);
+  wTimer=setTimeout(()=>{
+    const body={snap:wSnap(), ack:S.wAck||0}, j=JSON.stringify(body);
+    if(j===wLastSent) return; wLastSent=j;
+    wApi('/state', body).catch(()=>{ wLastSent=''; });
+  }, 400);
+}
+// a button press from the home screen, replayed with its own time; false = it does not fit the app's state
+function wApplyOp(o){
+  const a=S.active; if(!a || o.wid!==a.id) return false;
+  switch(o.a){
+    case 'checkin':
+      if(a.stage!=='checkin') return false;
+      if(!a.ago){ a.start=o.ts; a.warmup.start=o.ts; a.lastSnap=o.ts; a.date=iso(new Date(o.ts)); }
+      a.stage='steps'; return true;
+    case 'warmupDone':
+      if(a.stage!=='steps' || a.idx>=0 || a.warmup.end) return false;
+      a.warmup.end=Math.max(a.warmup.start+1000, o.ts); a.view=0;
+      if(!a.exercises.length){ a.end=a.warmup.end; a.stage='stretch'; } else a.moving=a.warmup.end;
+      return true;
+    case 'arrive':
+      if(a.stage!=='steps' || !a.moving || nextExIdx()!==o.exIdx) return false;
+      a.idx=o.exIdx; a.view=o.exIdx; a.exercises[o.exIdx].arrived=o.ts; a.moving=null; return true;
+    case 'finish':
+      if(a.stage!=='steps' || !a.moving || nextExIdx()>=0) return false;
+      a.end=a.moving; a.stage='stretch'; return true;
+    case 'stretchDone':
+      if(a.stage!=='stretching') return false;
+      a.stretch.end=Math.max(a.stretch.start+1000, o.ts); a.stage='context'; return true;
+    case 'start': case 'done': {
+      const e=curEx(); if(a.stage!=='steps' || a.moving || a.idx!==o.exIdx || !e) return false;
+      const x=e.sets[o.i]; if(!x) return false;
+      if(o.a==='start'){
+        e.sets.forEach(y=>{ if(y!==x && setState(y)==='run'){ y.end=Math.max(y.start+1000, o.ts); y.done=true; } });
+        Object.assign(x, {start:o.ts, end:null, pressed:true, est:false, done:false});
+      } else {
+        if(!x.start){ x.start=o.ts-1000; x.est=true; }
+        x.end=o.ts; x.done=true;
+        if(!e.sets.some(y=>setState(y)!=='done')) leaveExercise(o.ts, false);
+      }
+      return true; }
+  }
+  return false;
+}
+async function wPull(){
+  if(!wOn() || !S.active) return;
+  try{
+    const r=await (await wApi('/ops')).json();
+    const ops=(r.ops||[]).filter(o=>o.id>(S.wAck||0)).sort((x,y)=>x.id-y.id);
+    if(!ops.length) return;
+    let n=0; for(const o of ops) if(wApplyOp(o)) n++;
+    S.wAck=Math.max(...ops.map(o=>o.id)); save(); woScroll='top'; render();
+    if(n) toast(`${n} step${n>1?'s':''} from the home screen applied`);
+  }catch(e){}
+}
+function wFg(on){
+  if(!wOn()) return; wFgAt=Date.now();
+  wApi('/fg', {on: on && !!S.active}).catch(()=>{});
+}
+const b64uToU8 = s => { s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s), c=>c.charCodeAt(0)); };
+async function wPushOn(){
+  if(!wOn()){ toast('Enter the server address and key first'); return; }
+  if(!('serviceWorker' in navigator) || !('PushManager' in window) || !window.Notification){ toast('Notifications only work in the Gym app on the home screen (iOS 16.4 or newer)'); return; }
+  try{
+    const perm=await Notification.requestPermission();
+    if(perm!=='granted'){ toast('Notifications are not allowed (iPhone Settings → Notifications → Gym)'); return; }
+    const reg=await navigator.serviceWorker.ready;
+    const {key}=await (await wApi('/vapid')).json();
+    if(!key){ toast('The server has no push key yet'); return; }
+    const old=await reg.pushManager.getSubscription(); if(old) await old.unsubscribe();
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64uToU8(key)});
+    const r=await wApi('/sub', sub.toJSON()); if(!r.ok) throw new Error('server answered '+r.status);
+    S.settings.wPush=true; save(false); render(); toast('Notifications on ✓');
+  }catch(e){ toast('Could not turn on notifications: '+e.message); }
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
 
 /* ---- Apple Shortcuts bridges (iCloud Drive backup, Apple Health) ---- */
@@ -1094,11 +1206,11 @@ function renderTimer(){
 }
 let audioCtx = null;
 function unlockAudio(){ try{ if(!audioCtx){ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } if(audioCtx.state==='suspended') audioCtx.resume(); }catch(e){} }
-function beep(){
+function beep(n=3){
   if(!S.settings.sound || !audioCtx) return;
-  try{ [0,0.25,0.5].forEach(t=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.frequency.value=880; o.connect(g); g.connect(audioCtx.destination);
+  try{ [0,0.25,0.5].slice(0,n).forEach(t=>{ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.frequency.value=880; o.connect(g); g.connect(audioCtx.destination);
       const t0=audioCtx.currentTime+t; g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(0.4,t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.18); o.start(t0); o.stop(t0+0.2); }); }catch(e){}
-  if(navigator.vibrate) navigator.vibrate([200,100,200]);
+  if(navigator.vibrate) navigator.vibrate(n>1? [200,100,200] : [120]);
 }
 function tick(){
   const a=S.active; if(!a) return;
@@ -1112,7 +1224,8 @@ function tick(){
   });
   // beep once when the running rest of the current exercise is over
   const e=curEx();
-  if(e && a.stage==='steps' && !a.moving){ const li=liveRestIdx(e); if(li>=0){ const at=e.sets[li].end+e.rest*1000; if(e.rest>0 && Date.now()>=at && a.restBeep!==at){ a.restBeep=at; save(false); beep(); } } }
+  if(e && a.stage==='steps' && !a.moving){ const li=liveRestIdx(e); if(li>=0){ const at=e.sets[li].end+e.rest*1000; if(e.rest>0 && Date.now()>=at && a.restBeep!==at){ a.restBeep=at; save(false); beep(); }
+    else if(e.rest>=20 && Date.now()>=at-10000 && Date.now()<at && a.restWarn!==at){ a.restWarn=at; save(false); beep(1); } } }
   const el=$('#elapsed'); if(el) el.textContent=fmtClock((a.end||Date.now())-a.start);
   const sc=$('#stepClock'); if(sc){ const st = a.stage==='stretching'? a.stretch.start : a.warmup.start; sc.textContent=fmtClock(Date.now()-st); }
 }
@@ -1769,6 +1882,14 @@ function viewSettings(){
     <p class="small muted">Fixed days: ${Object.keys(S.planPins).filter(d=>d>=iso()).length}. Fix single days by tapping them in the week view or calendar.
       ${Object.keys(S.planPins).some(d=>d>=iso())?'<button class="link" data-act="clearPins">Clear all upcoming fixed days</button>':''}</p>
   </div>
+  <div class="card"><h2>📱 Home-screen buttons</h2>
+    <p class="small ink2" style="margin:0 0 6px">Start and finish sets with a button on the home screen (Shortcut "Gym Next"), see where you are ("Gym Status"), and get a notification 10 s before and at the end of each rest. Runs on your own free Cloudflare server.</p>
+    <label class="f">Server address</label><input data-set="wUrl" autocapitalize="off" autocorrect="off" placeholder="https://gym-widget.….workers.dev" value="${esc(st.wUrl)}">
+    <label class="f">Key</label><input data-set="wKey" autocapitalize="off" autocorrect="off" value="${esc(st.wKey)}">
+    <div class="grid2" style="margin-top:10px"><button data-act="wTest">Test connection</button>
+      <button class="${st.wPush?'':'primary'}" data-act="wPushOn">${st.wPush?'Notifications on ✓':'Turn on notifications'}</button></div>
+    ${st.wPush?'<button class="link" data-act="wPushTest">Send a test notification</button>':''}
+  </div>
   <div class="card"><h2>💼 Work hours</h2>
     <p class="small ink2" style="margin:0 0 6px">Log the time you were at work each day (e.g. 7-17 = 10 h). Work days without hours get an orange line in the calendar and show up on Today until you fill them in.</p>
     <div class="chips"><button class="chip ${st.workTrack?'on':''}" data-act="workTrack" data-v="1">On</button><button class="chip ${!st.workTrack?'on':''}" data-act="workTrack" data-v="0">Off</button></div>
@@ -1863,6 +1984,7 @@ const updateBanner = () => window.GymLoader && GymLoader.updateReady && S.profil
 const MANUAL = [
   {id:'start', title:'🏠 Today', items:[
     {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Once you trained today, the big title is your NEXT workout with its day (e.g. "Push – On Thursday"), and only a small "+ Another workout or activity" link stays. Below: the calendar for this and next week, your skip counter and bodyweight. Pull down at the top to refresh (also checks for a new version).'},
+    {id:'homebtn', title:'Home-screen buttons & rest notifications', where:'Settings → 📱 Home-screen buttons', text:'Two Shortcuts on the home screen (or in Control Center): "Gym Next" starts or finishes the next set of the current exercise, "Gym Status" shows where you are, to the second. A notification comes 10 s before the rest is over and when it is over (only while the app is closed; in the app you hear a short beep at 10 s). Changing exercises stays in the app; when you open it, all button presses are applied with their exact times. Needs your own free Cloudflare server: setup in widget/README.md of the app\'s code.'},
     {id:'work', title:'Work hours', where:'Today → 💼 Work today · tap a day', text:'Type the time you were at work, e.g. 7-17 (= 10 h), 7:30-16:15, or just hours like 8.5. "Off" = no work. Work days without hours get an orange line in the calendar and are listed on Today until filled in. Change any day by tapping it. Work days and on/off: Settings → Work hours.'},
     {id:'healthedit', title:'Change Apple Health data', where:'Tap a day → workout · Finish screen', text:'Apple Health data can always be fetched again (⟳ Get again), pasted again, edited by hand (✎ Edit) or removed.'},
     {id:'activity', title:'Other activities (golf, swimming …)', where:'Start workout → ⛳ Other activity', text:'Log anything that is not a gym workout: name, minutes, when you finished. It shows as ○ in the calendar and in History (with Apple Health data if you like), but never changes your training plan or counts as a planned workout.'},
@@ -2068,6 +2190,10 @@ document.addEventListener('click', ev=>{
       else warmupDone(ts); break; }
     case 'back': goBack(); break;
     case 'checkinDone': checkinDone(); break;
+    case 'wTest': if(!wOn()){ toast('Enter the server address and key first'); break; }
+      wApi('/status').then(r=>r.text().then(x=>toast(r.ok? 'Connected ✓ '+x : 'Server: '+x))).catch(e=>toast('No connection: '+e.message)); wLastSent=''; wSync(); break;
+    case 'wPushOn': wPushOn(); break;
+    case 'wPushTest': wApi('/test', {}).then(r=>r.json()).then(r=>toast(r.sent? 'Sent ✓ (lock the phone to see it as a banner)' : 'Not sent: turn notifications on again')).catch(e=>toast('No connection: '+e.message)); break;
     case 'workSave': { const el=document.getElementById('wk-'+v); if(el && workSave(v, el.value)){ const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); toast(fmtDate(v)+': '+(S.work[v].h? fmtH(S.work[v].h) : 'no work')); } break; }
     case 'workOff': { S.work[v]={h:0, src:'off'}; save(); const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); break; }
     case 'workTrack': S.settings.workTrack = v==='1'; save(); render(); break;
@@ -2175,9 +2301,12 @@ async function exportData(){
   const a=document.createElement('a'); a.href=URL.createObjectURL(file); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 // Coming back from the Shortcuts app: reload state from storage and refresh (unless a sheet is open)
+document.addEventListener('visibilitychange',()=>{ wFg(!document.hidden); if(!document.hidden) wPull(); });
+setInterval(()=>{ if(!document.hidden && S.active && wOn()){ wPull(); if(Date.now()-wFgAt>60000) wFg(true); } }, 15000);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = load(); if(!$('#modal').innerHTML) render(); else if(dayOpen){ const d=dayOpen, sc=$('#modal .sheet').scrollTop; openModal(daySheet(d)); dayOpen=d; $('#modal .sheet').scrollTop=sc; } else tick(); } wakeSync(); });
 document.addEventListener('touchcancel',()=>{ if(sh){ sh.d=0; sheetEnd(); } woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
 
 render();
+wFg(true); wPull(); wSync();
 window.__gymBooted = true; // tells the loader this version started fine
 if(window.GymLoader && GymLoader.justUpdated) setTimeout(()=>toast('Updated to the latest version ✓'), 300);

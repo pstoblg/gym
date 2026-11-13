@@ -20,6 +20,7 @@ Static PWA (no build step). GitHub Pages serves only the **loader** `index.html`
   - Other activities (golf, swimming): sessions with `activity` (type `'Other'`). `isGym()` / `gymOn()` keep them out of the plan, rotation and to-log logic.
   - Apple Health: `parseHealth()` accepts JSON, `key=value` text or four numbers; if the clipboard is empty (a copied Shortcuts Dictionary arrives empty) a manual paste box opens.
   - Work hours: `S.work[date] = {h, src}` (`parseWork` takes "7-17", "8.5", "off"). `workMissing()` = past `settings.workDays` since `settings.workSince` without an entry (orange `.wk` in the calendar, banner on Today). Today's calendar shows 3 weeks.
+  - Home-screen buttons (`widget/`, own Cloudflare Worker + Durable Object): the app sends `wSnap()` (mode, current exercise, queue of remaining exercises) on every `save()` via `wSync()`; the Shortcut "Gym Next" does the next one-button step on the server (`nextStep`/`applyOp` in `widget/worker.js`), the app replays those ops with their timestamps in `wPull()`/`wApplyOp()` and acknowledges them (`S.wAck`). The server sends rest notifications (−10 s, 0 s) as Web Push (`sw.js` push handler) unless the app is open (`/fg`). Keep app and worker step rules in sync.
   - Must end by setting `window.__gymBooted = true`. Otherwise the loader shows its error screen with rollback.
 - `app.css`: all styles.
 - `sw.js`: offline cache for the loader shell only (same-origin). Bump `VERSION` when the shell files change.
