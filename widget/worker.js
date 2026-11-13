@@ -2,9 +2,9 @@
 // button (Shortcut) and the info widget (Scriptable) can see and change it while the app is closed.
 // Needs: KV binding "GYM" and a secret "KEY". Every request must carry ?k=<KEY>.
 //
-//   GET  /widget  → what is going on now (JSON for the Scriptable widget)
-//   POST /next    → do the next step (start set / set done) and return a short text for the banner
-//   GET  /reset   → TEST ONLY: load a fake "Bench Press" workout
+//   GET  /widget  -> what is going on now (JSON for the Scriptable widget)
+//   POST /next    -> do the next step (start set / set done) and return a short text for the banner
+//   GET  /reset   -> TEST ONLY: load a fake "Bench Press" workout
 //
 // Every step is also stored in "ops" with its timestamp, so the app can replay it later.
 
@@ -22,7 +22,7 @@ function view(st){
   if(last) return {...base, phase:'rest', set:todo+1, w:sets[todo].w, r:sets[todo].r, since:last.end, restEnd:last.end+(e.rest||0)*1000};
   return {...base, phase:'todo', set:todo+1, w:sets[todo].w, r:sets[todo].r};
 }
-const setTxt = v => `${v.w} kg × ${v.r}`;
+const setTxt = v => `${v.w} kg \u00d7 ${v.r}`;
 
 function next(st){
   const now=Date.now(), sets=st.ex.sets;
@@ -30,12 +30,12 @@ function next(st){
   if(run>=0){
     sets[run].end=now; st.ops.push({a:'done', i:run, ts:now});
     const v=view(st);
-    return v.phase==='done' ? `✓ Set ${run+1} done · all sets of ${st.ex.name} done. Open the app for the next exercise.`
-      : `✓ Set ${run+1} done · rest ${st.ex.rest} s · next: ${setTxt(v)}`;
+    return v.phase==='done' ? `\u2713 Set ${run+1} done \u00b7 all sets of ${st.ex.name} done. Open the app for the next exercise.`
+      : `\u2713 Set ${run+1} done \u00b7 rest ${st.ex.rest} s \u00b7 next: ${setTxt(v)}`;
   }
   if(todo>=0){
     sets[todo].start=now; st.ops.push({a:'start', i:todo, ts:now});
-    return `▶ Set ${todo+1}/${sets.length} started · ${setTxt(sets[todo])}`;
+    return `\u25b6 Set ${todo+1}/${sets.length} started \u00b7 ${setTxt(sets[todo])}`;
   }
   return `All sets of ${st.ex.name} done. Open the app for the next exercise.`;
 }
@@ -49,7 +49,7 @@ export default {
 
     if(url.pathname==='/reset'){
       await store({ex:{name:'Bench Press', rest:90, sets:[1,2,3,4].map(()=>({w:60, r:10, start:null, end:null}))}, ops:[]});
-      return text('Test workout ready: Bench Press, 4 × 60 kg × 10');
+      return text('Test workout ready: Bench Press, 4 \u00d7 60 kg \u00d7 10');
     }
     if(url.pathname==='/widget') return json(view(await load()));
     if(url.pathname==='/next'){
