@@ -3,37 +3,39 @@
 const SERVER = 'https://gym-widget.YOUR-NAME.workers.dev';
 const KEY = 'YOUR-KEY';
 
-const C = { bg:new Color('#1b1d22'), ink:Color.white(), dim:new Color('#9aa0aa'), run:new Color('#4c8dff'), rest:new Color('#f0a63a'), ok:new Color('#3ec27a') };
+const C = { bg:new Color('#1b1d22'), ink:Color.white(), dim:new Color('#9aa0aa'), run:new Color('#4c8dff'), rest:new Color('#f0a63a'), ok:new Color('#3ec27a'), bad:new Color('#ff5a5a') };
 
 let v;
-try { v = await new Request(`${SERVER}/widget?k=${encodeURIComponent(KEY)}`).loadJSON(); }
+try { v = await new Request(`${SERVER}/widget?k=${encodeURIComponent(KEY)}&t=${Date.now()}`).loadJSON(); }
 catch(e){ v = {phase:'error', msg:String(e.message||e)}; }
 
 const w = new ListWidget();
 w.backgroundColor = C.bg;
-w.setPadding(12, 14, 12, 14);
-const line = (t, size, color, bold) => { const x=w.addText(t); x.font = bold? Font.boldSystemFont(size) : Font.systemFont(size); x.textColor=color; x.lineLimit=1; x.minimumScaleFactor=0.6; return x; };
-const timer = (ts, size, color) => { const d=w.addDate(new Date(ts)); d.applyTimerStyle(); d.font=Font.boldMonospacedSystemFont(size); d.textColor=color; return d; };
+w.setPadding(10, 12, 10, 12);
+const line = (t, size, color, bold) => { const x=w.addText(String(t)); x.font = bold? Font.boldSystemFont(size) : Font.systemFont(size); x.textColor=color; x.lineLimit=1; x.minimumScaleFactor=0.5; return x; };
+const timer = (ts, size, color) => { const d=w.addDate(new Date(ts)); d.applyTimerStyle(); d.font=Font.boldMonospacedSystemFont(size); d.textColor=color; d.lineLimit=1; d.minimumScaleFactor=0.5; return d; };
 
-if(v.phase==='none' || v.phase==='error'){
-  line('Gym', 13, C.dim, true); w.addSpacer(6);
-  line(v.phase==='error'? 'Cannot reach the server' : 'No workout running', 15, C.ink, true);
-  if(v.phase==='error') line(v.msg, 11, C.dim);
-} else {
-  line(v.name, 15, C.ink, true);
-  line(v.phase==='done'? `All ${v.count} sets done` : `Set ${v.set} of ${v.count} · ${v.w} kg × ${v.r}`, 12, C.dim);
-  w.addSpacer();
-  if(v.phase==='run'){ line('SET RUNNING', 11, C.run, true); timer(v.since, 26, C.run); }
-  else if(v.phase==='rest'){
-    const over = Date.now() >= v.restEnd;
-    line(over? 'REST OVER · GO' : 'REST LEFT', 11, over? C.ok : C.rest, true);
-    timer(v.restEnd, 26, over? C.ok : C.rest); // counts down to 0, then counts up again
-  }
-  else if(v.phase==='todo'){ line('READY', 11, C.ok, true); line('Tap ▶ Next to start', 13, C.ink); }
-  else { line('NEXT EXERCISE', 11, C.ok, true); line('Open the app', 13, C.ink); }
+// 1st line = what is going on (big and coloured), then the timer, then exercise + set
+if(v.phase==='error'){ line('NO CONNECTION', 14, C.bad, true); line(v.msg, 10, C.dim); }
+else if(v.phase==='none'){ line('NO WORKOUT', 14, C.dim, true); }
+else {
+  const over = v.phase==='rest' && Date.now() >= v.restEnd;
+  const head = v.phase==='run'? [`SET ${v.set} RUNNING`, C.run] : v.phase==='rest'? [over? 'REST OVER · GO' : 'REST', over? C.ok : C.rest]
+    : v.phase==='todo'? ['READY', C.ok] : ['NEXT EXERCISE', C.ok];
+  line(head[0], 14, head[1], true);
+  if(v.phase==='run') timer(v.since, 24, C.run);
+  else if(v.phase==='rest') timer(v.restEnd, 24, over? C.ok : C.rest); // counts down to 0, then up again
+  else line(v.phase==='todo'? 'Tap ▶ Next' : 'Open the app', 13, C.ink);
+  w.addSpacer(4);
+  line(v.name, 13, C.ink, true);
+  line(v.phase==='done'? `All ${v.count} sets done` : `Set ${v.set}/${v.count} · ${v.w} kg × ${v.r}`, 11, C.dim);
 }
-// ask iOS to refresh soon (it decides when); right after the rest ends the colour switches to green
-w.refreshAfterDate = new Date(v.restEnd && v.restEnd > Date.now() ? v.restEnd + 1000 : Date.now() + 60*1000);
+w.addSpacer();
+const f=new DateFormatter(); f.dateFormat='HH:mm:ss';
+line('as of '+f.string(new Date()), 9, C.dim);
+
+// ask iOS to refresh soon (iOS decides when)
+w.refreshAfterDate = new Date(Date.now() + 30*1000);
 
 if(config.runsInWidget) Script.setWidget(w); else await w.presentSmall();
 Script.complete();
