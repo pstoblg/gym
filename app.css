@@ -295,3 +295,7 @@ body.notabs .dockbar{padding-bottom:max(8px, calc(env(safe-area-inset-bottom) - 
 #ptr.ready{color:var(--accent)} #ptr.ready .arw{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 
 .modal{overscroll-behavior:contain}
+
+.cal .c.wk{box-shadow:inset 0 -3px 0 var(--warn)}
+.wkrow{gap:6px;flex-wrap:nowrap}
+.wkrow .wkin{width:118px;padding:8px 10px;font-size:15px}

@@ -66,10 +66,11 @@ function defaultState(){
     settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(), maxInRow:0,
       defaultRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
       step:0.25, progStep:1, keepAwake:true, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
-      backupToken:null, backupVerified:0 },
+      backupToken:null, backupVerified:0, workTrack:true, workDays:[1,2,3,4,5], workSince:localToday() },
     templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)), tplHistory: {},
     planPins: {}, moves: [],
     sessions: [], bodyweight: [], active: null, healthPending: null, lastChange: 0,
+    work: {}, // date → {h: hours (decimal), src: what was typed, e.g. "7-17"}
   };
 }
 function load(){
@@ -84,6 +85,7 @@ function migrate(s){
   if(s.settings.icloudShortcut==='PPL Save') s.settings.icloudShortcut='Gym Save';
   if(s.settings.healthShortcut==='PPL Health') s.settings.healthShortcut='Gym Health';
   s.profile = Object.assign({}, d.profile, s.profile||{});
+  s.work = s.work||{}; // workSince defaults to the first start with this feature, so older days are never flagged
   s.sessions = s.sessions||[]; s.bodyweight = s.bodyweight||[]; s.planPins = s.planPins||{}; s.moves = s.moves||[];
   s.templates = s.templates||{};
   for(const k of Object.keys(DEFAULT_TEMPLATES)){
@@ -600,6 +602,41 @@ function obNext(){
   p.obStep++; save(); window.scrollTo(0,0); render();
 }
 
+/* ================= WORK HOURS =================
+   Typed as a time range ("7-17", "7:30-17:15", "7.30–16") or as hours ("10", "8.5", "8,5", "8:30"). "off" / "0" = no work. */
+function parseWork(txt){
+  const t=String(txt||'').trim().toLowerCase().replace(/\s+/g,'').replace(/[–—]/g,'-').replace(/bis|to/g,'-').replace(/h$/,'');
+  if(!t) return null;
+  if(/^(off|frei|0)$/.test(t)) return {h:0, src:'off'};
+  const time = x => { const m=x.match(/^(\d{1,2})(?:[:.h](\d{2}))?$/); if(!m) return NaN; const h=+m[1], mi=+(m[2]||0); return h<=24 && mi<60? h+mi/60 : NaN; };
+  const r=t.match(/^([\d:.h]+)-([\d:.h]+)$/);
+  if(r){ const a=time(r[1]), b=time(r[2]); if(!isFinite(a)||!isFinite(b)) return null;
+    let h=b-a; if(h<0) h+=24; return {h:Math.round(h*100)/100, src:String(txt).trim()}; }
+  let h;
+  if(/^\d{1,2}:\d{2}$/.test(t)){ const [a,b]=t.split(':'); h=+a + +b/60; }
+  else h=num(t);
+  if(!isFinite(h) || h<0 || h>24 || !/^[\d.,:]+$/.test(t)) return null;
+  return {h:Math.round(h*100)/100, src:String(txt).trim()};
+}
+const fmtH = h => (Math.round(h*100)/100).toString()+' h';
+const workOf = d => S.work[d];
+const isWorkDay = d => S.settings.workDays.includes(parseISO(d).getDay());
+const workLabel = w => !w? '' : w.h===0? 'No work' : fmtH(w.h)+(/-/.test(w.src)? ' ('+esc(w.src)+')' : '');
+// past work days (since the feature started, at most 60 days back) without work hours
+function workMissing(){
+  if(!S.settings.workTrack) return [];
+  const out=[], today=iso(); let d=S.settings.workSince > addDays(today,-60)? S.settings.workSince : addDays(today,-60);
+  for(; d<today; d=addDays(d,1)) if(isWorkDay(d) && !workOf(d)) out.push(d);
+  return out;
+}
+function workSave(d, txt){
+  const w=parseWork(txt);
+  if(!w){ toast('Enter hours like 8.5, or a time like 7-17'); return false; }
+  S.work[d]=w; save(); return true;
+}
+const workInput = (d, cls) => { const w=workOf(d);
+  return `<span class="row wkrow ${cls||''}"><input id="wk-${d}" class="wkin" placeholder="7-17 or 8.5" value="${w? esc(w.h===0?'off':w.src) : ''}"><button class="small" data-act="workSave" data-v="${d}">Save</button><button class="small ghost" data-act="workOff" data-v="${d}">Off</button></span>`; };
+
 /* ================= TODAY ================= */
 function dayMarks(list){ return list.map(s=> s.activity? '<span class="muted">○</span>' : s.status==='done'?`<span class="t-${s.type}">●</span>`:'<span style="color:var(--bad)">✕</span>').join(''); }
 // Marker for one day: logged entries, the planned workout (future), or a "?" for a past training day without entry
@@ -619,21 +656,22 @@ function calCell(ds, planMap, missing, showMonth){
   let cls = list.some(s=>s.status==='done')? 'cd' : list.length? 'cs' : movedFrom? 'cm' : '';
   if(!list.length && !movedFrom && ds>=today && p && p.key && p.key!=='rest') cls += ' up';
   if(missing.includes(ds)) cls += ' tolog';
+  if(S.settings.workTrack && ds<today && ds>=S.settings.workSince && isWorkDay(ds) && !workOf(ds)) cls += ' wk';
   const cell = (ds<today && !S.sessions.some(s=>s.date===ds) && !missing.includes(ds) && !movedFrom)? '' : dayCell(ds, planMap, missing);
   const dd=parseISO(ds), label = showMonth && dd.getDate()===1? `${dd.getDate()}.${dd.getMonth()+1}.` : dd.getDate();
   return `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${label}</div><div class="st">${cell}</div></div>`;
 }
 const CAL_HEAD = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
-const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:var(--good-soft)"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 25%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span>📌 fixed</span></div>`;
+const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:var(--good-soft)"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 25%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span><i style="box-shadow:inset 0 -3px 0 var(--warn)"></i>Work hours missing</span><span>📌 fixed</span></div>`;
 function planMapUntil(lastDate){ const n=daysBetween(iso(), lastDate); const m={}; if(n>=0) planDays(n+1).forEach(p=>m[p.date]=p); return m; }
 function greeting(){ const h=new Date().getHours(); return h<11?'Good morning':h<17?'Hi':'Good evening'; }
 function viewToday(){
   const today = iso(), mon = mondayOf(today), ss = skipStats();
   const tp = todayPlan(), plan = tp.key && tp.key!=='rest'? {type:keyType(tp.key), boulder:tp.key==='PullBoulder', key:tp.key} : nextPlan();
   const rest = tp.key==='rest', nt = rest? nextTraining() : null;
-  const missing = unaccountedDays(), planMap = planMapUntil(addDays(mon,13));
+  const missing = unaccountedDays(), planMap = planMapUntil(addDays(mon,20));
   let cells = CAL_HEAD;
-  for(let i=0;i<14;i++) cells += calCell(addDays(mon,i), planMap, missing, true);
+  for(let i=0;i<21;i++) cells += calCell(addDays(mon,i), planMap, missing, true);
   const ago = S.settings.icloudLast? Math.floor((Date.now()-S.settings.icloudLast)/86400000) : null;
   let banner = '';
   if(missing.length && !S.active) banner += `<div class="card" style="border-color:var(--bad);border-style:dashed"><b style="color:var(--bad)">${missing.length} day${missing.length>1?'s':''} to log</b>
@@ -641,6 +679,10 @@ function viewToday(){
     ${missing.slice(0,4).map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>
       <span class="row"><button class="small no" data-act="missSkip" data-v="${d}">Skipped</button><button class="small" data-act="manualOpen" data-v="${d}">Trained</button><button class="small mvbtn" data-act="moveOpen" data-v="${d}">Moved</button></span></div>`).join('')}
     <button class="link" style="font-size:12px" data-act="missRest" data-v="${missing[0]}">${fmtDate(missing[0])} was planned wrong, it was a rest day</button></div>`;
+  const wm = workMissing();
+  if(wm.length && !S.active) banner += `<div class="card" style="border-color:var(--warn)"><b style="color:var(--warn)">Work hours to log: ${wm.length} day${wm.length>1?'s':''}</b>
+    <p class="small ink2" style="margin:4px 0 6px">Time at work, e.g. <b>7-17</b> (= 10 h) or <b>8.5</b>. "Off" if you didn't work.${wm.length>5?' Showing the oldest 5; the rest have an orange line in the calendar.':''}</p>
+    ${wm.slice(0,5).map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>${workInput(d)}</div>`).join('')}</div>`;
   if(!S.active && !S.settings.backupToken) banner += `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>No iCloud backup yet</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Set up</button></div>`;
   else if(!S.active && !icloudDirty() && backupUnchecked()) banner += `<div class="card row between" style="border-color:var(--accent)"><div class="small"><b>Backup saved ${fmtTime(S.settings.backupSavedAt||S.settings.icloudLast)}</b><br><span class="muted">Check that it arrived complete in iCloud.</span></div><button class="primary" data-act="bkVerify">✓ Check</button></div>`;
   else if(!S.active && icloudDirty()) banner += `<div class="card row between" style="border-color:var(--warn)">
@@ -678,10 +720,12 @@ function viewToday(){
       ${!rest? '<button class="link" data-act="moveOpen" data-v="'+today+'">↔ Move today’s workout to a rest day</button>' : ''}
     </div>`;
   }
-  const runs = longRuns(13);
-  return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}
+  const runs = longRuns(20), tw = workOf(today);
+  const workCard = !S.settings.workTrack || (!isWorkDay(today) && !tw)? '' : `<div class="card"><div class="row between wrap"><h2 style="margin:0">💼 Work today</h2>
+    ${tw? `<span class="row"><b>${workLabel(tw)}</b><button class="small ghost" data-act="day" data-v="${today}">Change</button></span>` : workInput(today)}</div></div>`;
+  return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}${workCard}
   <div class="card">
-    <div class="row between" style="margin-bottom:8px"><h2 style="margin:0">This & next week</h2><button class="small ghost" data-act="monthView">📅 Month</button></div>
+    <div class="row between" style="margin-bottom:8px"><h2 style="margin:0">Next 3 weeks</h2><button class="small ghost" data-act="monthView">📅 Month</button></div>
     <div class="cal">${cells}</div>
     ${runs.map(r=>`<p class="small err" style="margin:8px 0 0">⚠ ${r.len} training days in a row: ${fmtDate(r.start)} – ${fmtDate(r.end)} (your limit: ${maxInRow()}). Consider a rest day in between: tap a day to change it.</p>`).join('')}
     ${CAL_LEGEND}
@@ -1014,7 +1058,8 @@ function viewWorkout(){
       <label class="f">Bodyweight (kg, optional)</label><input inputmode="decimal" data-post="bw" value="${esc(f.bw||'')}" placeholder="${latestBW()?fw(latestBW()):''}">
       <label class="f">Notes</label><textarea data-notes>${esc(a.notes)}</textarea>
       <label class="f">Apple Health (steps, calories, heart rate during the workout)</label>
-      ${h?`<div class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</div>`:`<button class="ghost big" style="margin-bottom:8px" data-act="healthActive">Get Apple Health data</button>${healthPasteBtn()}`}
+      ${h?`<div class="small">${healthLine(h)}</div><div class="row wrap" style="gap:4px"><button class="link" data-act="healthActive">⟳ Get again</button><button class="link" data-act="healthPaste" data-id="active">Paste</button><button class="link" data-act="healthEdit" data-id="active">✎ Edit</button></div>`
+        :`<button class="ghost big" style="margin-bottom:8px" data-act="healthActive">Get Apple Health data</button>${healthPasteBtn()}<button class="link" data-act="healthEdit" data-id="active">Enter by hand</button>`}
       </div>
       <button class="primary big" data-act="saveWorkout">Save workout</button>
       <div class="row between" style="margin-top:6px"><span></span><button class="link" style="color:var(--bad)" data-act="discard">Discard workout</button></div>`;
@@ -1380,7 +1425,7 @@ function sessionDetail(s){
   const p=s.pre||{}, q=s.post||{}, h=s.health;
   if(s.activity) return `<div class="card"><h2>${esc(s.activity)} <span class="pill">activity</span></h2>
     <div class="small ink2">${s.start&&s.end?`${fmtTime(s.start)}–${fmtTime(s.end)} · ${fmtDur(s.end-s.start)}`:'No time given'}</div>
-    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : sesHealthBtns(s)}
+    ${h? `<p class="small" style="margin-bottom:0">${healthLine(h)}</p>`:''}${sesHealthBtns(s)}
     <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete activity</button></div>`;
   const exs = (s.exercises||[]).some(e=>e.arrived)? recordTimeline(s) : (s.exercises||[]).map(e=>{
     const prev = prevOccurrence(e.name, s);
@@ -1401,16 +1446,31 @@ function sessionDetail(s){
     </div>
     ${exs}
     <table class="tbl" style="margin-top:8px"><tr><td>Energy before</td><td>${p.energy||'—'}</td><td>Feeling</td><td>${q.feeling||'—'}</td></tr><tr><td>Motivation</td><td>${p.motivation||'—'}</td><td></td><td></td></tr><tr><td>Soreness</td><td>${p.soreness||'—'}</td><td>RPE</td><td>${q.rpe||'—'}</td></tr><tr><td>Sleep</td><td>${p.sleep||'—'}</td><td>Power</td><td>${q.power||'—'}</td></tr></table>
-    ${h? `<p class="small">👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}</p>` : sesHealthBtns(s)}
+    ${h? `<p class="small" style="margin-bottom:0">${healthLine(h)}</p>`:''}${sesHealthBtns(s)}
     ${s.notes?`<p class="small">${esc(s.notes)}</p>`:''}
     <button class="link" style="color:var(--bad)" data-act="delSes" data-id="${s.id}">Delete workout</button></div>`;
 }
 // "Get" runs the Shortcut; "Paste" is always there (also after the app was closed in between) and targets this workout
 function sesHealthBtns(s){
-  if(!s.start || !s.end) return '';
   const waiting = S.healthPending && S.healthPending.target===s.id;
-  return `<div class="grid2" style="margin-top:8px"><button class="ghost big" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>
-    <button class="${waiting?'primary':'ghost'} big" data-act="healthPaste" data-id="${s.id}">Paste result</button></div>`;
+  if(s.health) return `<div class="row wrap" style="gap:4px;margin-top:2px">${s.start&&s.end?`<button class="link" data-act="healthSes" data-id="${s.id}">⟳ Get again</button>`:''}
+    <button class="link" data-act="healthPaste" data-id="${s.id}">Paste</button><button class="link" data-act="healthEdit" data-id="${s.id}">✎ Edit</button></div>`;
+  return `${s.start&&s.end?`<div class="grid2" style="margin-top:8px"><button class="ghost big" data-act="healthSes" data-id="${s.id}">Get Apple Health data</button>
+    <button class="${waiting?'primary':'ghost'} big" data-act="healthPaste" data-id="${s.id}">Paste result</button></div>`:''}
+    <button class="link" data-act="healthEdit" data-id="${s.id}">Enter Apple Health data by hand</button>`;
+}
+const healthLine = h => `👟 ${h.steps} steps · 🔥 ${h.kcal} kcal · ❤️ avg ${h.hrAvg||'—'} / max ${h.hrMax||'—'}`;
+function healthTarget(id){ return id==='active'? S.active : S.sessions.find(x=>x.id===id); }
+function healthEditSheet(id){
+  const o=healthTarget(id); if(!o) return; const h=o.health||{};
+  const f=(k,l)=>`<div><label class="f">${l}</label><input id="he-${k}" inputmode="numeric" value="${h[k]!=null?h[k]:''}"></div>`;
+  openModal(`<h2>Apple Health data</h2><div class="grid2">${f('steps','Steps')}${f('kcal','Active kcal')}${f('hrAvg','Heart rate avg')}${f('hrMax','Heart rate max')}</div>
+    <div class="grid2" style="margin-top:14px"><button class="big" data-act="healthEditCancel">Cancel</button><button class="primary big" data-act="healthEditSave" data-id="${id}">Save</button></div>
+    ${o.health?`<button class="link" style="color:var(--bad)" data-act="healthRemove" data-id="${id}">Remove Apple Health data</button>`:''}`);
+}
+function healthEditDone(id, h){
+  const o=healthTarget(id); if(o) o.health=h;
+  const d=dayOpen; save(); closeModal(); render(); if(d){ dayOpen=d; openModal(daySheet(d)); }
 }
 let dayOpen=null;
 function daySheet(date){
@@ -1433,8 +1493,11 @@ function daySheet(date){
       <button class="no" data-act="missSkip" data-v="${date}">Skipped</button><button data-act="manualOpen" data-v="${date}">Trained</button><button class="mvbtn" data-act="moveOpen" data-v="${date}">Moved</button></div>
       <button class="link" style="font-size:12px" data-act="missRest" data-v="${date}">It was planned wrong, it was a rest day</button></div>`;
   }
+  const w=workOf(date), wkMiss = S.settings.workTrack && date<today && date>=S.settings.workSince && isWorkDay(date) && !w;
+  const workHtml = date>today? '' : `<div class="card" ${wkMiss?'style="border-color:var(--warn)"':''}><div class="row between wrap"><b>💼 Work${w?': '+workLabel(w):''}</b>${workInput(date)}</div>
+    ${wkMiss?'<p class="small" style="color:var(--warn);margin:6px 0 0">Work hours missing for this day.</p>':''}</div>`;
   return `<div class="row between"><h2 style="margin:0">${fmtDate(date)} ${date.slice(0,4)}</h2><button class="icon" data-act="closeModal">✕</button></div>
-  <div style="margin-top:12px">${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
+  <div style="margin-top:12px">${workHtml}${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
   <button class="ghost big" data-act="manualOpen" data-v="${date}">+ Add entry for this day</button>`;
 }
 
@@ -1706,6 +1769,11 @@ function viewSettings(){
     <p class="small muted">Fixed days: ${Object.keys(S.planPins).filter(d=>d>=iso()).length}. Fix single days by tapping them in the week view or calendar.
       ${Object.keys(S.planPins).some(d=>d>=iso())?'<button class="link" data-act="clearPins">Clear all upcoming fixed days</button>':''}</p>
   </div>
+  <div class="card"><h2>💼 Work hours</h2>
+    <p class="small ink2" style="margin:0 0 6px">Log the time you were at work each day (e.g. 7-17 = 10 h). Work days without hours get an orange line in the calendar and show up on Today until you fill them in.</p>
+    <div class="chips"><button class="chip ${st.workTrack?'on':''}" data-act="workTrack" data-v="1">On</button><button class="chip ${!st.workTrack?'on':''}" data-act="workTrack" data-v="0">Off</button></div>
+    ${st.workTrack?`<label class="f">Work days</label><div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${st.workDays.includes(d)?'on':''}" data-act="workDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>`:''}
+  </div>
   <div class="card"><h2>General</h2>
     <label class="f">Weight step for +/− buttons (kg)</label><input data-set="step" inputmode="decimal" value="${fw(st.step)}">
     <label class="f">Weight increase when all sets hit the top of the rep range (kg)</label><input data-set="progStep" inputmode="decimal" value="${fw(st.progStep)}">
@@ -1795,6 +1863,8 @@ const updateBanner = () => window.GymLoader && GymLoader.updateReady && S.profil
 const MANUAL = [
   {id:'start', title:'🏠 Today', items:[
     {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Once you trained today, the big title is your NEXT workout with its day (e.g. "Push – On Thursday"), and only a small "+ Another workout or activity" link stays. Below: the calendar for this and next week, your skip counter and bodyweight. Pull down at the top to refresh (also checks for a new version).'},
+    {id:'work', title:'Work hours', where:'Today → 💼 Work today · tap a day', text:'Type the time you were at work, e.g. 7-17 (= 10 h), 7:30-16:15, or just hours like 8.5. "Off" = no work. Work days without hours get an orange line in the calendar and are listed on Today until filled in. Change any day by tapping it. Work days and on/off: Settings → Work hours.'},
+    {id:'healthedit', title:'Change Apple Health data', where:'Tap a day → workout · Finish screen', text:'Apple Health data can always be fetched again (⟳ Get again), pasted again, edited by hand (✎ Edit) or removed.'},
     {id:'activity', title:'Other activities (golf, swimming …)', where:'Start workout → ⛳ Other activity', text:'Log anything that is not a gym workout: name, minutes, when you finished. It shows as ○ in the calendar and in History (with Apple Health data if you like), but never changes your training plan or counts as a planned workout.'},
     {id:'cal2w', title:'2-week calendar', where:'Today → This & next week', text:'Green = trained, red = skipped, amber ↔ = moved, dashed outline = planned (upcoming), red dashed "LOG" = planned training day in the past without an entry. 📌 = day fixed by hand. Tap any day to see, plan, move or log it. "📅 Month" opens the month view.'},
     {id:'tolog', title:'"To log" days (red dashed)', where:'Today → "days to log" card · calendars', text:'Every past training day of your plan needs an entry: Workout, Skip or Moved. Until then it is marked red dashed with "LOG". This starts at your first ever entry, so the past always adds up. If the plan itself was wrong, choose "it was a rest day".'},
@@ -1998,6 +2068,15 @@ document.addEventListener('click', ev=>{
       else warmupDone(ts); break; }
     case 'back': goBack(); break;
     case 'checkinDone': checkinDone(); break;
+    case 'workSave': { const el=document.getElementById('wk-'+v); if(el && workSave(v, el.value)){ const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); toast(fmtDate(v)+': '+(S.work[v].h? fmtH(S.work[v].h) : 'no work')); } break; }
+    case 'workOff': { S.work[v]={h:0, src:'off'}; save(); const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); break; }
+    case 'workTrack': S.settings.workTrack = v==='1'; save(); render(); break;
+    case 'workDay': { const d=+v, r=S.settings.workDays; S.settings.workDays = r.includes(d)? r.filter(x=>x!==d) : [...r,d]; save(); render(); break; }
+    case 'healthEdit': healthEditSheet(t.dataset.id); break;
+    case 'healthEditCancel': { const d=dayOpen; closeModal(); if(d){ dayOpen=d; openModal(daySheet(d)); } break; }
+    case 'healthEditSave': { const g=k=>Math.max(0, Math.round(num($('#he-'+k).value)));
+      healthEditDone(t.dataset.id, {steps:g('steps'), kcal:g('kcal'), hrAvg:g('hrAvg'), hrMax:g('hrMax')}); toast('Apple Health data saved'); break; }
+    case 'healthRemove': if(confirm('Remove the Apple Health data of this workout?')) healthEditDone(t.dataset.id, null); break;
     case 'checkinCancel': if(confirm('Cancel this workout? Nothing is saved.')){ S.settings.nextOverride=W.prevOverride||null; S.active=null; save(); go('today'); } break;
     case 'stretchYes': W.stretch={did:true, start:Date.now(), end:null}; W.stage='stretching'; save(); render(); break;
     case 'stretchNo': W.stretch={did:false}; W.stage='context'; save(); render(); break;

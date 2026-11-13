@@ -19,6 +19,7 @@ Static PWA (no build step). GitHub Pages serves only the **loader** `index.html`
   - Workout extras: `progressHint()` (all working sets hit the top of the rep range last time → +`settings.progStep` kg), `perRep()` (s/rep on done sets), "+ Add a set" (`setAdd`, resumes a finished exercise), Screen Wake Lock while a workout runs (`wakeSync`, `settings.keepAwake`). The "Previous" edge is hidden until you pull at the top; other screens have pull-to-refresh (`ptr`).
   - Other activities (golf, swimming): sessions with `activity` (type `'Other'`). `isGym()` / `gymOn()` keep them out of the plan, rotation and to-log logic.
   - Apple Health: `parseHealth()` accepts JSON, `key=value` text or four numbers; if the clipboard is empty (a copied Shortcuts Dictionary arrives empty) a manual paste box opens.
+  - Work hours: `S.work[date] = {h, src}` (`parseWork` takes "7-17", "8.5", "off"). `workMissing()` = past `settings.workDays` since `settings.workSince` without an entry (orange `.wk` in the calendar, banner on Today). Today's calendar shows 3 weeks.
   - Must end by setting `window.__gymBooted = true`. Otherwise the loader shows its error screen with rollback.
 - `app.css`: all styles.
 - `sw.js`: offline cache for the loader shell only (same-origin). Bump `VERSION` when the shell files change.
