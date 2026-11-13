@@ -8,7 +8,8 @@
 //   GET  /status  -> what is going on right now, as text
 //   POST /state   -> the app sends its current exercise ({snap, ack}); ops up to "ack" are already in the app
 //   GET  /ops     -> button presses the app has not applied yet
-//   POST /fg      -> {on}: the app is open (then it beeps itself and no notifications are sent)
+//   POST /fg      -> {on}: the app is open (then it beeps itself and no notifications are sent); on leaving the app
+//                    during a workout one notification shows where you are
 //   GET  /vapid   -> public key for the push subscription;  POST /sub -> store a push subscription
 //   POST /test    -> send a test notification
 //   GET  /widget  -> JSON for the (optional) Scriptable widget
@@ -190,12 +191,20 @@ export class GymDO {
       // the app is the source of truth; presses it has not seen yet are applied on top again
       ops=ops.filter(o=>o.id>(body.ack||0));
       const s=body.snap||{mode:'none'};
+      if(s.mode==='none'){ // workout saved or discarded in the app: nothing of it stays on the server
+        await this.st.delete(['snap','ops','events','sent']); await this.st.deleteAlarm(); return json({ok:true, cleared:true}); }
       ops.forEach(o=>applyOp(s, o));
       await this.st.put({snap:s, ops}); await this.schedule(s);
       return json({ok:true, pending:ops.length});
     }
     if(p==='/ops') return json({ops});
-    if(p==='/fg'){ await this.st.put('fg', {on:!!body.on, at:now}); return json({ok:true}); }
+    if(p==='/fg'){
+      await this.st.put('fg', {on:!!body.on, at:now});
+      // app left during a workout: one notification with where you are (at most once a minute)
+      const v=view(snap, now), last=await this.get('leftAt', 0);
+      if(!body.on && v.phase!=='none' && now-last>60000){ await this.st.put('leftAt', now);
+        await this.push({title:'Workout running · you can lock the phone', body:statusText(snap, now)}, true); }
+      return json({ok:true}); }
     if(p==='/vapid') return json({key:this.env.VAPID_PUBLIC||null});
     if(p==='/sub'){
       if(!body.endpoint || !body.keys) return json({ok:false}, 400);

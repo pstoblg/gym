@@ -261,6 +261,12 @@ async function wPull(){
 }
 function wFg(on){
   if(!wOn()) return; wFgAt=Date.now();
+  if(!on && navigator.sendBeacon){ // leaving the app: a beacon still goes out while the phone locks
+    clearTimeout(wTimer); const body={snap:wSnap(), ack:S.wAck||0};
+    const base=S.settings.wUrl.trim().replace(/\/+$/,''), k='?k='+encodeURIComponent(S.settings.wKey.trim());
+    navigator.sendBeacon(base+'/state'+k, JSON.stringify(body)); wLastSent=JSON.stringify(body);
+    navigator.sendBeacon(base+'/fg'+k, JSON.stringify({on:false})); return;
+  }
   wApi('/fg', {on: on && !!S.active}).catch(()=>{});
 }
 const b64uToU8 = s => { s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s), c=>c.charCodeAt(0)); };
