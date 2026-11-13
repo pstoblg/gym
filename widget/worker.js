@@ -26,7 +26,7 @@ export default {
   async fetch(req, env){
     if(req.method==='OPTIONS') return new Response(null, {headers:CORS});
     const url=new URL(req.url);
-    if(!env.KEY || url.searchParams.get('k')!==env.KEY) return text('Wrong or missing key', 401);
+    if(!env.KEY || url.searchParams.get('k')!==String(env.KEY).trim()) return text('Wrong or missing key', 401);
     const id=env.GYM_DO.idFromName('me');
     return env.GYM_DO.get(id).fetch(req);
   }
@@ -162,7 +162,7 @@ export async function vapidHeader(endpoint, env, now){
   const c=b64u(enc.encode(JSON.stringify({aud:new URL(endpoint).origin, exp:Math.floor(now/1000)+12*3600, sub:'https://pstoblg.github.io/gym/'})));
   const key=await crypto.subtle.importKey('jwk', JSON.parse(env.VAPID_PRIVATE), {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
   const sig=await crypto.subtle.sign({name:'ECDSA', hash:'SHA-256'}, key, enc.encode(h+'.'+c));
-  return `vapid t=${h}.${c}.${b64u(sig)}, k=${env.VAPID_PUBLIC}`;
+  return `vapid t=${h}.${c}.${b64u(sig)}, k=${String(env.VAPID_PUBLIC).trim()}`;
 }
 async function sendPush(sub, obj, env){
   const body=await encryptPush(sub, JSON.stringify(obj));
@@ -205,7 +205,7 @@ export class GymDO {
       if(!body.on && v.phase!=='none' && now-last>60000){ await this.st.put('leftAt', now);
         await this.push({title:'Workout running · you can lock the phone', body:statusText(snap, now)}, true); }
       return json({ok:true}); }
-    if(p==='/vapid') return json({key:this.env.VAPID_PUBLIC||null});
+    if(p==='/vapid') return json({key:this.env.VAPID_PUBLIC? String(this.env.VAPID_PUBLIC).trim() : null});
     if(p==='/sub'){
       if(!body.endpoint || !body.keys) return json({ok:false}, 400);
       const subs=(await this.get('subs', [])).filter(s=>s.endpoint!==body.endpoint);
