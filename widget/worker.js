@@ -3,7 +3,7 @@
 // app is closed, and sends the rest notifications (10 s before the end, and at the end) as Web Push to the Gym app.
 //
 // Every request must carry ?k=<KEY> (secret). Secrets: KEY, VAPID_PRIVATE (JWK), VAPID_PUBLIC (base64url).
-//   POST /next    -> the next one-button step (start workout, warm-up done, at the machine, start/finish set,
+//   POST /next    -> the next one-button step (warm-up done, at the machine, start/finish set,
 //                    finish workout, done stretching); short text for the banner
 //   GET  /status  -> what is going on right now, as text
 //   POST /state   -> the app sends its current exercise ({snap, ack}); ops up to "ack" are already in the app
@@ -33,7 +33,8 @@ export default {
 };
 
 /* ---------- workout logic (pure, also used by the tests) ----------
-   "Next" does every step that is ONE button in the app. Steps with a choice say "open the app". */
+   "Next" does every step that is ONE button in the app, once a workout runs (it never starts one).
+   Steps with a choice say "open the app". */
 const clock = ms => { ms=Math.max(0, Math.round(ms/1000)); return `${Math.floor(ms/60)}:${String(ms%60).padStart(2,'0')}`; };
 function setLabel(sets, i){
   if(sets[i].warm) return 'Warm-up set';
@@ -59,8 +60,8 @@ const firstSet = q => { const i=firstTodo(q.sets); return i<0? '' : ` · ${setLa
 export function statusText(snap, now){
   const v=view(snap, now);
   switch(v.phase){
-    case 'none': return 'No workout running';
-    case 'checkin': return 'Workout not started · Next = start workout (warm-up)';
+    case 'none': return 'No workout running · start it in the app';
+    case 'checkin': return 'Workout not started yet · start it in the app (Next never starts a workout)';
     case 'warmup': return `Warm-up ${clock(now-v.since)} · Next = warm-up done`;
     case 'moving': return v.next ? `On the way to ${v.next.name} (${clock(now-v.since)})${firstSet(v.next)} · Next = I'm at the machine`
       : 'All exercises done · Next = finish workout';
@@ -102,7 +103,6 @@ export function nextStep(snap, now){
   const v=view(snap, now), base={ts:now, wid:snap&&snap.wid};
   let op=null;
   switch(v.phase){
-    case 'checkin': op={a:'checkin'}; break;
     case 'warmup': op={a:'warmupDone'}; break;
     case 'moving': op= v.next? {a:'arrive', exIdx:v.next.exIdx} : {a:'finish'}; break;
     case 'stretching': op={a:'stretchDone'}; break;
