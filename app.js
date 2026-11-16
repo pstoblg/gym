@@ -171,10 +171,11 @@ let S = load();
 function save(touch=true){ if(touch) S.lastChange=Date.now(); try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('Could not save: '+e.message); } wSync(); }
 
 /* ---- Home-screen buttons: your own Cloudflare server (widget/worker.js) ----
-   The app sends the current exercise on every change (wSnap → POST /state). The Shortcut buttons "Gym Next" /
-   "Gym Status" call the server, which stores each press as an op; the app applies them with their exact time
-   when it is opened again (wPull) and acknowledges them (wAck). The server also sends the rest notifications
-   (10 s before the end and at the end) as Web Push, unless the app is open (/fg). */
+   The app sends the current exercise on every change (wSnap → POST /state). The Shortcut button "Gym Next"
+   calls the server, which stores each press as an op; the app applies them with their exact time
+   when it is opened again (wPull) and acknowledges them (wAck). All notifications (the answer to Next, the rest
+   notifications 10 s before the end and at the end, "you can lock the phone" once per workout) come from the
+   server as Web Push, so they all show up as "Gym". /status is still there for an optional "Gym Status" Shortcut. */
 var wTimer=null, wLastSent='', wFgAt=0;
 function wOn(){ try{ return !!(S.settings.wUrl && S.settings.wKey); }catch(e){ return false; } }
 function wApi(path, body){
@@ -184,7 +185,8 @@ function wApi(path, body){
 // one exercise as the server sees it (u = unit after the reps)
 function wEx(e, i){
   const u = e.kind==='time'? ' s' : e.kind==='dur'? ' min' : '';
-  return {exIdx:i, name:e.name, rest:e.rest||0,
+  const ph = progressHint(e); // recommended heavier weight, shown in the notifications too
+  return {exIdx:i, name:e.name, rest:e.rest||0, up: ph? ph.to : null,
     sets:e.sets.map(x=>({w:hasWeight(e)? num(x.w) : 0, r:String(x.r??''), u, warm:!!x.warm, start:x.start||null, end:x.end||null}))};
 }
 function wSnap(){
@@ -195,7 +197,7 @@ function wSnap(){
   const b={wid:a.id, queue};
   if(a.stage==='checkin') return {...b, mode:'checkin'};
   if(a.stage==='stretch') return {...b, mode:'stretch'};
-  if(a.stage==='stretching') return {...b, mode:'stretching', since:a.stretch.start};
+  if(a.stage==='stretching') return a.stretch.start? {...b, mode:'stretching', since:a.stretch.start} : {...b, mode:'stretchMove', since:a.stretch.moving};
   if(a.stage!=='steps') return {...b, mode:'after'};
   if(a.idx<0 && !a.warmup.end) return {...b, mode:'warmup', since:a.warmup.start};
   const e=curEx();
@@ -230,8 +232,14 @@ function wApplyOp(o){
     case 'finish':
       if(a.stage!=='steps' || !a.moving || nextExIdx()>=0) return false;
       a.end=a.moving; a.stage='stretch'; return true;
+    case 'stretchYes':
+      if(a.stage!=='stretch') return false;
+      a.stretch={did:true, moving:o.ts, start:null, end:null}; a.stage='stretching'; return true;
+    case 'stretchStart':
+      if(a.stage!=='stretching' || !a.stretch || a.stretch.start) return false;
+      a.stretch.start=Math.max(a.stretch.moving||0, o.ts); return true;
     case 'stretchDone':
-      if(a.stage!=='stretching') return false;
+      if(a.stage!=='stretching' || !a.stretch.start) return false;
       a.stretch.end=Math.max(a.stretch.start+1000, o.ts); a.stage='context'; return true;
     case 'start': case 'done': {
       const e=curEx(); if(a.stage!=='steps' || a.moving || a.idx!==o.exIdx || !e) return false;
@@ -390,8 +398,9 @@ function shortcutSaveSteps(){
 const fmtStamp = ts => { const d=new Date(ts); return `${iso(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 function requestHealth(target, start, end){ // target: 'active' or a session id
   if(!start || !end){ toast('Start and end time are needed'); return; }
-  S.healthPending = {target, at:Date.now()}; save(false);
-  runShortcut(S.settings.healthShortcut||'Gym Health','text', `${fmtStamp(start)}|${fmtStamp(end)}`);
+  const sent = `${fmtStamp(start)}|${fmtStamp(end)}`;
+  S.healthPending = {target, at:Date.now(), sent}; save(false);
+  runShortcut(S.settings.healthShortcut||'Gym Health','text', sent);
 }
 // Accepts JSON ({"steps":…}) or plain text like "steps=4321 kcal=250 hrAvg=120 hrMax=165" (one per line, : or = ),
 // or just four numbers in that order. Numbers may have units, ' or ’ as thousands separator and a decimal comma.
@@ -416,8 +425,24 @@ function parseHealth(txt){
   if(!Object.keys(out).length) throw new Error('no steps / kcal / heart rate found in “'+txt.slice(0,40)+'”');
   return {steps:Math.round(out.steps||0), kcal:Math.round(out.kcal||0), hrAvg:Math.round(out.hrAvg||0), hrMax:Math.round(out.hrMax||0)};
 }
-function applyHealth(txt){
+// all four values 0 = the Shortcut found no Health data for that time. Don't store that silently: show what arrived.
+let healthRaw='';
+function healthZeroSheet(txt){
+  healthRaw=txt; const p=S.healthPending||{}, tgt=p.target||'active';
+  openModal(`<h2>Apple Health sent only zeros</h2>
+    <p class="small ink2">The Shortcut ran, but found no steps, calories or heart rate for this time. This is what arrived:</p>
+    <pre class="small" style="white-space:pre-wrap;background:var(--card2);padding:8px;border-radius:8px;margin:0">${esc(txt.slice(0,400))}</pre>
+    ${p.sent?`<p class="small ink2">Time the app asked for: <code>${esc(p.sent)}</code></p>`:''}
+    <p class="small"><b>Usual causes</b></p>
+    <ol class="small ink2"><li>Shortcuts may not read Health: iPhone Settings → Health → Data Access &amp; Devices → Shortcuts → turn on Steps, Active Energy, Heart Rate.</li>
+    <li>The dates are not recognised: in the Shortcut, tap the <b>Start</b> / <b>End</b> variables after <b>Get Dates from Input</b> and run it with the play button; they must show the workout's date and time.</li>
+    <li>The filter in <b>Find Health Samples</b> must be <i>Start Date is between Start and End</i> (not “is today” / “in the last …”), with no limit.</li></ol>
+    <button class="primary big" data-act="healthEdit" data-id="${esc(tgt)}">Enter the values by hand</button>
+    <div class="grid2" style="margin-top:8px"><button class="big" data-act="closeModal">Cancel</button><button class="big" data-act="healthZeroSave">Save zeros anyway</button></div>`);
+}
+function applyHealth(txt, force){
   const h = parseHealth(txt);
+  if(!force && !h.steps && !h.kcal && !h.hrAvg && !h.hrMax){ healthZeroSheet(txt); return; }
   const tgt = S.healthPending && S.healthPending.target;
   if(tgt==='active' && S.active) S.active.health = h;
   else { const s=S.sessions.find(x=>x.id===tgt); if(!s) throw new Error('no workout is waiting for health data'); s.health=h; }
@@ -918,6 +943,8 @@ function leaveExercise(ts, skipped){
     e.sets.forEach((x,i)=>{ x.start=from+i*span; x.end=from+(i+1)*span; x.est=true; x.done=true; });
   }
   e.left=ts; a.moving=ts;
+  // that was the last exercise: the workout ends here and the stretching question comes right away
+  if(a.stage==='steps' && nextExIdx()<0){ a.end=ts; a.stage='stretch'; }
 }
 function startSet(si){
   const a=A(), e=curEx(); if(!e || a.view!==a.idx || a.moving) return;
@@ -1091,7 +1118,8 @@ function exScreen(){
     <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
     ${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
     <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
-  const ph = live && !a.moving? progressHint(e) : null;
+  // also on the exercise you are walking to, so you can set the weight before you start
+  const ph = (live && !a.moving) || (!past && a.moving && i===nIdx)? progressHint(e) : null;
   if(ph) rows.push(`<li class="ev"><div class="prog"><span>⬆ Last time ${ph.n} × ${ph.top} (top of ${esc(e.target)}). Go heavier: <b>${fw(ph.to)} kg</b></span><button class="small primary" data-act="progApply">+${fw(ph.step)} kg</button></div></li>`);
   if(!live && !past && a.moving && i===nIdx) rows.push(`<li class="mv"><div class="move"><div class="small">On the way here</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div></div></li>`);
   if(e.arrived){ const fs=e.sets.filter(x=>x.start).map(x=>x.start).sort((p,q)=>p-q)[0];
@@ -1153,6 +1181,11 @@ function viewWorkout(){
     <div class="eyebrow">Workout ended ${fmtTime(a.end)} · ${fmtDur(a.end-a.start)}</div>
     <div class="exname" style="margin:2px 0 14px">Will you stretch?</div>
     <div class="grid2"><button class="huge yes" data-act="stretchYes">Yes</button><button class="huge no" data-act="stretchNo">No</button></div>`;
+  if(a.stage==='stretching' && !a.stretch.start) return head + `
+    <div class="eyebrow">Workout ended ${fmtTime(a.end)} · ${fmtDur(a.end-a.start)}</div><div class="exname" style="margin:2px 0 12px">Moving to stretch</div>
+    <ol class="tl"><li class="mv"><div class="move"><div class="small">On the way to stretch</div><div class="t" data-up="${a.stretch.moving}">${fmtClock(Date.now()-a.stretch.moving)}</div></div></li></ol>
+    <button class="primary big" style="margin-top:16px" data-act="stretchStart">Start stretching</button>
+    <button class="link" data-act="stretchNo">Not stretching after all</button>`;
   if(a.stage==='stretching') return head + `
     <div class="eyebrow">After the workout</div><div class="exname" style="margin:2px 0 12px">Stretching</div>
     <ol class="tl"><li class="run"><div class="set run" style="cursor:default"><div class="n">⏱</div><div class="val">Stretching</div><div class="btns"><span class="runclock" id="stepClock">${fmtClock(Date.now()-a.stretch.start)}</span></div></div></li></ol>
@@ -1207,7 +1240,9 @@ function renderTimer(){
   else if(a.moving) html = nx? `<button class="big mvb" data-act="arrive">I'm at the machine<span class="sub">${esc(nx.name)}</span></button>` : `<button class="primary big" data-act="arrive">Finish workout<span class="sub">Stretching and how it went</span></button>`;
   else if(a.view!==a.idx) html = `<button class="primary big" data-act="exToCur">Back to current<span class="sub">${esc(e?e.name:'')}</span></button>`;
   else { const none = e && !e.sets.some(x=>x.start||x.end);
-    html = `<div class="dockrow"><button class="big danger" data-act="exSkipOpen">⤼ Skip</button><button class="big" data-act="exMoveOn">Move on<span class="sub">${nx?'→ '+esc(nx.name):'Finish'}</span></button></div><div class="note">${none?'Nothing ticked: all sets count, time split evenly':'Sets you haven\'t done won\'t count'}</div>`; }
+    // Skip only until the first set has started; after that it's "Move on" (done sets count)
+    const mv = `<button class="big" data-act="exMoveOn">Move on<span class="sub">${nx?'→ '+esc(nx.name):'Finish · stretching next'}</span></button>`;
+    html = `${none? `<div class="dockrow"><button class="big danger" data-act="exSkipOpen">⤼ Skip</button>${mv}</div>` : mv}<div class="note">${none?'Nothing ticked: all sets count, time split evenly':'Sets you haven\'t done won\'t count'}</div>`; }
   box.innerHTML = `<div class="dockbar"><div class="in">${html}</div></div>`;
 }
 let audioCtx = null;
@@ -1241,11 +1276,18 @@ setInterval(tick, 500);
 const PULL_AT=60;
 function gestureOn(){ return VIEW==='workout' && inSteps() && !$('#modal').innerHTML; }
 function atTop(){ return window.scrollY<=3; }
-function atBottom(){ return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2; }
-function edgeDir(goingUp){
+// iOS (home-screen app) can report a viewport height that differs from the scrollable area, so the plain
+// innerHeight check never hit the bottom there. Take the most generous viewport height and allow a few px.
+function atBottom(){
+  const se=document.scrollingElement||document.documentElement, vv=window.visualViewport;
+  const vh=Math.max(window.innerHeight, se.clientHeight, vv? vv.height : 0);
+  return Math.ceil(window.scrollY) + vh >= se.scrollHeight - 6;
+}
+// stuck = the finger moved up a good bit but the page did not scroll: we are at the bottom, whatever the numbers say
+function edgeDir(goingUp, stuck){
   const a=A();
   if(goingUp && atTop() && a.view>0) return 'up';
-  if(!goingUp && atBottom() && a.view<a.exercises.length-1) return 'down';
+  if(!goingUp && (atBottom() || stuck) && a.view<a.exercises.length-1) return 'down';
   return null;
 }
 function updateEdges(drag){
@@ -1290,7 +1332,7 @@ function sheetEnd(){
 document.addEventListener('touchstart',ev=>{
   const sheet=$('#modal .sheet');
   sh = sheet? {y:ev.touches[0].clientY, x:ev.touches[0].clientX, sheet, d:0, on:false, t:Date.now(), tgt:ev.target} : null;
-  woPull = gestureOn()? {y:ev.touches[0].clientY, d:0, dir:null} : null;
+  woPull = gestureOn()? {y:ev.touches[0].clientY, d:0, dir:null, sy:window.scrollY} : null;
   ptr = ptrOn() && atTop()? {y:ev.touches[0].clientY, d:0} : null;
 },{passive:true});
 document.addEventListener('touchmove',ev=>{
@@ -1304,7 +1346,8 @@ document.addEventListener('touchmove',ev=>{
   if(ptr){ const dy=ev.touches[0].clientY-ptr.y;
     if(dy>0 && atTop()){ ev.preventDefault(); ptr.d=dy*0.5; ptrShow(ptr.d); } else if(ptr.d){ ptr.d=0; ptrShow(0); } }
   if(!woPull) return; const dy=ev.touches[0].clientY-woPull.y;
-  const dir = woPull.dir || (dy!==0? edgeDir(dy>0) : null);
+  const stuck = dy<-24 && Math.abs(window.scrollY-woPull.sy)<1;
+  const dir = woPull.dir || (dy!==0? edgeDir(dy>0, stuck) : null);
   if(!dir || (dir==='up'&&dy<=0) || (dir==='down'&&dy>=0)){ if(woPull.dir){ woPull.d=0; updateEdges(); } return; }
   ev.preventDefault();
   if(!woPull.dir){ woPull.dir=dir; woPull.y=ev.touches[0].clientY; return; } // measure from where the edge was reached
@@ -1889,7 +1932,7 @@ function viewSettings(){
       ${Object.keys(S.planPins).some(d=>d>=iso())?'<button class="link" data-act="clearPins">Clear all upcoming fixed days</button>':''}</p>
   </div>
   <div class="card"><h2>📱 Home-screen buttons</h2>
-    <p class="small ink2" style="margin:0 0 6px">Start and finish sets with a button on the home screen (Shortcut "Gym Next"), see where you are ("Gym Status"), and get a notification 10 s before and at the end of each rest. Runs on your own free Cloudflare server.</p>
+    <p class="small ink2" style="margin:0 0 6px">Start and finish sets with a button on the home screen (Shortcut "Gym Next") and get a notification 10 s before and at the end of each rest. All workout notifications come from the Gym app (title “Gym – exercise”, last line “Next = …” says what the button does next). Runs on your own free Cloudflare server.</p>
     <label class="f">Server address</label><input data-set="wUrl" autocapitalize="off" autocorrect="off" placeholder="https://gym-widget.….workers.dev" value="${esc(st.wUrl)}">
     <label class="f">Key</label><input data-set="wKey" autocapitalize="off" autocorrect="off" value="${esc(st.wKey)}">
     <div class="grid2" style="margin-top:10px"><button data-act="wTest">Test connection</button>
@@ -1990,7 +2033,7 @@ const updateBanner = () => window.GymLoader && GymLoader.updateReady && S.profil
 const MANUAL = [
   {id:'start', title:'🏠 Today', items:[
     {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Once you trained today, the big title is your NEXT workout with its day (e.g. "Push – On Thursday"), and only a small "+ Another workout or activity" link stays. Below: the calendar for this and next week, your skip counter and bodyweight. Pull down at the top to refresh (also checks for a new version).'},
-    {id:'homebtn', title:'Home-screen buttons & rest notifications', where:'Settings → 📱 Home-screen buttons', text:'Two Shortcuts on the home screen (or in Control Center). "Gym Next" does the next one-button step of a running workout: warm-up done, I’m at the machine, start set, set done, finish workout, done stretching. It never starts a workout, and where the app offers a choice (stretch yes/no, last questions) it tells you to open the app. "Gym Status" shows where you are, to the second. A notification comes 10 s before the rest is over and when it is over (only while the app is closed; in the app you hear a short beep at 10 s). When you open the app, all button presses are applied with their exact times. Leaving the app during a workout sends one notification with where you are. After the workout is saved, nothing of it stays on the server. Needs your own free Cloudflare server: setup in widget/README.md of the app\'s code.'},
+    {id:'homebtn', title:'Home-screen buttons & rest notifications', where:'Settings → 📱 Home-screen buttons', text:'Two Shortcuts on the home screen (or in Control Center). "Gym Next" does the next one-button step of a running workout: warm-up done, I’m at the machine, start set, set done, yes I’ll stretch, start stretching, done stretching. It never starts a workout; for “No” to stretching and the last questions open the app. Its answer comes as a Gym notification: title “Gym – exercise”, then what happened (e.g. Set 2/3 started · 60 kg × 8), and the last line “Next = …” says what the next press does. A notification also comes 10 s before the rest is over and when it is over (only while the app is closed; in the app you hear a short beep at 10 s). When you open the app, all button presses are applied with their exact times. The first time you leave the app during a workout, one notification says you can lock the phone. ("Gym Status" still works if you set it up, but you don’t need it.) After the workout is saved, nothing of it stays on the server. Needs your own free Cloudflare server: setup in widget/README.md of the app\'s code.'},
     {id:'work', title:'Work hours', where:'Today → 💼 Work today · tap a day', text:'Type the time you were at work, e.g. 7-17 (= 10 h), 7:30-16:15, or just hours like 8.5. "Off" = no work. Work days without hours get an orange line in the calendar and are listed on Today until filled in. Change any day by tapping it. Work days and on/off: Settings → Work hours.'},
     {id:'healthedit', title:'Change Apple Health data', where:'Tap a day → workout · Finish screen', text:'Apple Health data can always be fetched again (⟳ Get again), pasted again, edited by hand (✎ Edit) or removed.'},
     {id:'activity', title:'Other activities (golf, swimming …)', where:'Start workout → ⛳ Other activity', text:'Log anything that is not a gym workout: name, minutes, when you finished. It shows as ○ in the calendar and in History (with Apple Health data if you like), but never changes your training plan or counts as a planned workout.'},
@@ -2016,12 +2059,12 @@ const MANUAL = [
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
     {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙.'},
-    {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
+    {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". After the last exercise it goes straight to the stretching question. At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
     {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info under the name (several lines possible), warm-up sets, working sets, target and rest. "This workout only" or "Also update template": today\'s workout uses the change right away, and all template changes of one workout become ONE new version when the workout ends. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
-    {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: ticked sets still count, moving starts.'},
+    {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: only until the first set has started, then the bar shows just Move on (done sets count).'},
     {id:'earlier', title:'Warm-up finished earlier…', where:'Workout → warm-up', text:'Forgot to tap "Warm-up done"? Pick how many minutes ago. Stretching has the same option.'},
     {id:'endearly', title:'End workout early', where:'Workout → bottom of the exercise', text:'Ends the workout (with "finished X min ago"). The exercise you are at counts with its ticked sets, the remaining ones are marked as skipped.'},
-    {id:'stretch', title:'Stretching & time pressure', where:'After the last exercise', text:'Green Yes / red No for stretching (timed if yes). Then: time-limited or no plans after. Both are tracked in Stats.'},
+    {id:'stretch', title:'Stretching & time pressure', where:'After the last exercise', text:'The last set of the last exercise ends the workout (that is its end time) and the question comes right away. Yes: "Moving to stretch" until you tap Start stretching, then the stretching is timed. No: straight on. Then: time-limited or no plans after. Both are tracked in Stats.'},
     {id:'reload', title:'Nothing gets lost', where:'Settings → Workout in progress', text:'The workout is saved on the phone with every tap and only times are stored, so closing the app, a reload, an update or no signal continue exactly where you were. Every 15 min (changeable) a "Save" button offers an iCloud copy of the running workout.'},
     {id:'record', title:'Finished workout', where:'History → tap a workout', text:'The whole workout on one line: every set with its time, rests, setting up and moving, plus a bar that splits the time into warm-up, sets, rest, setup and moving.'},
   ]},
@@ -2044,7 +2087,7 @@ const MANUAL = [
     {id:'restore', title:'Restore / new phone', where:'Welcome screen or Settings → Restore from data.json', text:'Pick data.json (or a dated backup). Replaces the data on this device.'},
   ]},
   {id:'health', title:'❤️ Apple Health', items:[
-    {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". If the clipboard can\'t be read, a box opens: long-press → Paste → Add. The Shortcut must copy TEXT (steps=…, kcal=…, hrAvg=…, hrMax=…), not a Dictionary. Calories and heart rate need the Apple Watch. Setup in Settings → Apple Health.'},
+    {id:'hs', title:'Steps, calories, heart rate', where:'Finish workout → Get Apple Health data · or a day’s details', text:'Runs the Shortcut "Gym Health" with the workout time. Back in the app tap "Paste Apple Health result". If the clipboard can\'t be read, a box opens: long-press → Paste → Add. The Shortcut must copy TEXT (steps=…, kcal=…, hrAvg=…, hrMax=…), not a Dictionary. Calories and heart rate need the Apple Watch. If only zeros arrive, the app shows what the Shortcut sent and the usual causes. Setup in Settings → Apple Health.'},
   ]},
   {id:'app', title:'⚙️ App & updates', items:[
     {id:'upd', title:'Updates & ⟳ Refresh', where:'Settings → App version · banner "New version available"', text:'The app checks for a new version on every start. When one is found, tap "⟳ Refresh". Your data and a running workout stay. Works offline with the last version.'},
@@ -2210,7 +2253,8 @@ document.addEventListener('click', ev=>{
       healthEditDone(t.dataset.id, {steps:g('steps'), kcal:g('kcal'), hrAvg:g('hrAvg'), hrMax:g('hrMax')}); toast('Apple Health data saved'); break; }
     case 'healthRemove': if(confirm('Remove the Apple Health data of this workout?')) healthEditDone(t.dataset.id, null); break;
     case 'checkinCancel': if(confirm('Cancel this workout? Nothing is saved.')){ S.settings.nextOverride=W.prevOverride||null; S.active=null; save(); go('today'); } break;
-    case 'stretchYes': W.stretch={did:true, start:Date.now(), end:null}; W.stage='stretching'; save(); render(); break;
+    case 'stretchYes': W.stretch={did:true, moving:Date.now(), start:null, end:null}; W.stage='stretching'; save(); render(); break;
+    case 'stretchStart': if(W.stretch && !W.stretch.start){ W.stretch.start=Date.now(); save(); render(); } break;
     case 'stretchNo': W.stretch={did:false}; W.stage='context'; save(); render(); break;
     case 'stretchDone': W.stretch.end=Date.now(); W.stage='context'; save(); render(); break;
     case 'ctx': W.context=v; W.stage='final'; save(); window.scrollTo(0,0); render(); break;
@@ -2221,6 +2265,7 @@ document.addEventListener('click', ev=>{
     case 'healthSes': { const s=S.sessions.find(x=>x.id===t.dataset.id); if(s){ const d=dayOpen; requestHealth(s.id, s.start, s.end); if(d) openModal(daySheet(d)); } break; }
     case 'healthPaste': if(t.dataset.id){ S.healthPending={target:t.dataset.id, at:Date.now()}; save(false); } pasteHealth(); break;
     case 'healthManual': try{ applyHealth($('#hlTxt').value); }catch(e){ toast('Could not read it: '+e.message); } break;
+    case 'healthZeroSave': try{ applyHealth(healthRaw, true); }catch(e){ toast('Could not save: '+e.message); } break;
     // history
     case 'day': dayOpen=v; openModal(daySheet(v)); break;
     case 'monthView': calMonth = iso().slice(0,7); go('stats'); break;
