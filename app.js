@@ -579,7 +579,9 @@ function weeklyMaxRun(){ // longest run of training days in the weekly schedule 
   let best=0, run=0; for(let i=0;i<14;i++){ if(train[i%7]){ run++; best=Math.max(best,run); } else run=0; } return best;
 }
 const maxInRow = () => S.settings.maxInRow || weeklyMaxRun();
-function trainingOn(d, pins){ if(gymOn(d).some(s=>s.status==='done')) return true; const p=pins[d]; return p? p!=='rest' : !isRestDay(d); }
+// a day you actually trained on counts; a day with only a skip logged was a day off, so it breaks a run
+function trainingOn(d, pins){ const g=gymOn(d); if(g.some(s=>s.status==='done')) return true; if(g.some(s=>s.status==='skip')) return false;
+  const p=pins[d]; return p? p!=='rest' : !isRestDay(d); }
 // length of the run of consecutive training days that contains day d
 function runAt(d, pins){
   if(!trainingOn(d,pins)) return 0;
@@ -838,17 +840,19 @@ function viewToday(){
     const doneToday = S.sessions.find(s=>s.date===today && s.status==='done' && isGym(s));
     const acts = S.sessions.filter(s=>s.date===today && s.activity);
     const actLine = acts.length? `<p class="small ink2" style="margin:8px 0 0">Today also: ${acts.map(s=>esc(s.activity)+(s.start&&s.end?' '+fmtDur(s.end-s.start):'')).join(', ')}</p>` : '';
-    if(doneToday){
-      // trained today: the big title is the NEXT workout, with its day, so it never reads like "Push today"
+    const skipToday = !doneToday && S.sessions.find(s=>s.date===today && s.status==='skip' && isGym(s));
+    if(doneToday || skipToday){
+      // trained (or skipped) today: the big title is the NEXT workout, with its day, so it never reads like "Push today"
       const nx = nextTraining(), nk = nx? nx.key : nextPlan().key, inDays = nx? daysBetween(today, nx.date) : null;
       const nd = nx? parseISO(nx.date) : null;
       const when = inDays===1? 'Tomorrow' : nd? `On ${DOWL[nd.getDay()]}, ${nd.getDate()}.${nd.getMonth()+1}.` : '';
       main = `<div class="card">
-        <div class="small" style="color:var(--good);font-weight:600">✓ Trained today: ${esc(woLabel(doneToday))}${doneToday.start&&doneToday.end?' · '+fmtDur(doneToday.end-doneToday.start):''}</div>
+        ${doneToday? `<div class="small" style="color:var(--good);font-weight:600">✓ Trained today: ${esc(woLabel(doneToday))}${doneToday.start&&doneToday.end?' · '+fmtDur(doneToday.end-doneToday.start):''}</div>`
+          : `<div class="small" style="color:var(--bad);font-weight:600">✕ Skipped today: ${esc(skipToday.type)}${skipToday.skip&&skipToday.skip.reason?' · '+esc(skipToday.skip.reason):''}</div>`}
         <div class="muted small" style="margin-top:12px">Next workout</div>
         <div class="hero t-${keyType(nk)}">${esc(keyLabel(nk))}</div>
         ${when?`<div class="ink2 small" style="margin-top:2px">${when}</div>`:''}${actLine}
-        <button class="link" style="margin-top:8px" data-act="startOpen">+ Another workout or activity (golf, swimming …)</button>
+        <button class="link" style="margin-top:8px" data-act="startOpen">${doneToday? '+ Another workout or activity (golf, swimming …)' : '+ Train today after all, or another activity'}</button>
       </div>`;
     } else main = `<div class="card">
       <div class="row between"><span class="muted small">${rest?'Today: rest day':'Today’s plan'}</span>${tp.pinned?'<span class="pill">📌 fixed</span>':''}</div>
