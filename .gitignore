@@ -10,3 +10,4 @@ backups/
 Thumbs.db
 .vscode/
 .claude/settings.local.json
+.wrangler/

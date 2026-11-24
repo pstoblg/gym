@@ -179,7 +179,7 @@ function save(touch=true){ if(touch) S.lastChange=Date.now(); try{ localStorage.
 var wTimer=null, wLastSent='', wFgAt=0;
 function wOn(){ try{ return !!(S.settings.wUrl && S.settings.wKey); }catch(e){ return false; } }
 function wApi(path, body){
-  const u = S.settings.wUrl.trim().replace(/\/+$/,'') + path + '?k=' + encodeURIComponent(S.settings.wKey.trim());
+  const u = S.settings.wUrl.trim().replace(/\/+$/,'') + path + (path.includes('?')? '&' : '?') + 'k=' + encodeURIComponent(S.settings.wKey.trim());
   return fetch(u, body===undefined? {cache:'no-store'} : {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body), keepalive:true});
 }
 // one exercise as the server sees it (u = unit after the reps)
@@ -294,6 +294,194 @@ async function wPushOn(){
   }catch(e){ toast('Could not turn on notifications: '+e.message); }
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+
+/* ---- Coach: chat with your own Claude Code (subscription) running on your PC ----
+   phone → widget server /coach/send → WebSocket → coach/bridge.mjs on the PC → `claude -p --resume`.
+   Every chat is one Claude Code session (c.session). Each message carries the whole training record
+   (coachFiles), the PC writes it into the coach's folder. The answer is polled from /coach/job while it grows.
+   Chats live in their own key (gym.coach.v1), not in S, so they stay out of the iCloud backup. */
+const CKEY = 'gym.coach.v1';
+const COACH_MODELS = [['claude-opus-5-5','Opus 5.5'],['claude-sonnet-5-5','Sonnet 5.5'],['claude-haiku-5-5','Haiku 5.5'],['claude-fable-5-2','Fable 5.2']];
+const COACH_EFFORTS = ['low','medium','high','xhigh','max'];
+function cLoad(){ try{ const c=JSON.parse(localStorage.getItem(CKEY)); if(c && Array.isArray(c.chats)) return Object.assign({model:'claude-opus-5-5', effort:'high'}, c); }catch(e){} return {chats:[], model:'claude-opus-5-5', effort:'high'}; }
+let C = cLoad(), coachChat = null, coachStat = null, coachDraft = '';
+const coachPolling = new Set();
+function cSave(){ try{ localStorage.setItem(CKEY, JSON.stringify(C)); }catch(e){ toast('Could not save the chat: '+e.message); } }
+const cChat = id => C.chats.find(c=>c.id===id);
+const modelLabel = m => (COACH_MODELS.find(x=>x[0]===m)||[m,m])[1];
+// everything the coach gets: a readable log + the raw data (without the server key and the template snapshots)
+function coachFiles(){
+  const raw = JSON.parse(JSON.stringify(S));
+  delete raw.settings.wKey; delete raw.settings.wUrl;
+  raw.tplHistory = Object.fromEntries(Object.entries(raw.tplHistory||{}).map(([k,l])=>[k, l.map(h=>({v:h.v, at:h.at, note:h.note}))]));
+  return {'training-log.md': coachLog(), 'gym-data.json': JSON.stringify(raw)};
+}
+function coachLog(){
+  const st=S.settings, L=[], t=ts=>ts? fmtTime(ts) : '?';
+  const kv = o => Object.entries(o||{}).filter(([,v])=>v!==''&&v!=null).map(([k,v])=>`${k} ${v}`).join(', ');
+  L.push(`# Training log`, `Exported ${iso()} ${fmtTime(Date.now())}. Newest first. Check-in and feeling scales are 1-5.`, '');
+  L.push(`## Plan`, `Split: ${st.rotation.join(' -> ')}. Training days: ${[1,2,3,4,5,6,0].filter(d=>!st.restDays.includes(d)).map(d=>DOW[d]).join(', ')}. Every 2nd Pull with bouldering: ${st.boulderEvery2nd?'yes':'no'}. Skips so far: ${skipStats().total}.`);
+  L.push(`Next 14 days: ${planDays(14).map(p=>`${p.date.slice(5)} ${p.logged.length? 'logged' : p.key==='rest'? 'rest' : keyLabel(p.key)}`).join(' | ')}`, '');
+  if(S.active){ const a=S.active; L.push(`## Workout in progress (${keyLabel(a.key)}, started ${t(a.start)})`);
+    a.exercises.forEach(e=>{ const d=e.sets.filter(x=>x.end); L.push(`- ${e.name}: ${d.length? d.map(x=>(x.warm?'warm ':'')+setLabel(e,x)).join(', ') : e.skipped? 'skipped' : 'not yet'}`); }); L.push(''); }
+  L.push(`## Sessions`);
+  for(const s of sortSessions(S.sessions).reverse()){
+    const day = `${s.date} ${DOW[parseISO(s.date).getDay()]}`;
+    if(s.status==='skip'){ const k=s.skip||{}; L.push(`### ${day} · SKIPPED ${s.type}`, `Reason: ${k.reason||'?'}${k.instead?` · instead: ${k.instead}`:''}${k.minutes?` · time gained ${k.minutes} min`:''}${k.worth!=null?` · worth it ${k.worth} (-2..2)`:''}${k.note?` · note: ${k.note}`:''}`); continue; }
+    const time = s.start&&s.end? ` · ${t(s.start)}-${t(s.end)} (${fmtDur(s.end-s.start)})` : '';
+    if(s.activity){ L.push(`### ${day} · Activity: ${s.activity}${time}`); if(s.health) L.push(`Health: ${kv(s.health)}`); continue; }
+    L.push(`### ${day} · ${s.type}${s.boulder?' + Bouldering':''}${s.tplKey?` (template ${keyLabel(s.tplKey)} v${s.tplV||'?'})`:''}${time}`);
+    if(s.pre) L.push(`Check-in: ${kv(s.pre)}`);
+    if(s.post) L.push(`After: ${kv(s.post)}`);
+    const extra=[s.warmup&&s.warmup.start&&s.warmup.end? `warm-up ${fmtDur(s.warmup.end-s.warmup.start)}`:'', s.stretch? (s.stretch.did?'stretched':'no stretch'):'', s.context? (s.context==='limited'?'time-limited':'no plans after'):''].filter(Boolean);
+    if(extra.length) L.push(extra.join(' · '));
+    (s.exercises||[]).forEach(e=>{
+      const w=(e.warm&&e.warm.length)? ` (warm-up ${e.warm.map(x=>setLabel(e,x)).join(', ')})` : '';
+      L.push(`- ${e.name} [${e.muscle||''}, ${e.kind}, target ${e.target||'?'}]: ${e.skipped||!e.sets.length? 'skipped' : e.sets.map(x=>setLabel(e,x)).join(', ')}${w}${e.start&&e.end?` · ${fmtDur(e.end-e.start)}`:''}${e.info?` · info: ${e.info}`:''}`);
+    });
+    if(s.health) L.push(`Health: ${kv(s.health)}`);
+    if(s.notes) L.push(`Notes: ${s.notes}`);
+  }
+  L.push('', `## Bodyweight (kg)`, S.bodyweight.slice().sort((a,b)=>a.date<b.date?1:-1).map(b=>`${b.date}: ${fw(b.kg)}`).join(' | ') || '-');
+  const wk=Object.entries(S.work).sort((a,b)=>a[0]<b[0]?1:-1);
+  L.push('', `## Work hours`, wk.map(([d,w])=>`${d}: ${w.h} h`).join(' | ') || '-');
+  L.push('', `## Current templates`);
+  for(const w of WORKOUTS){ const tp=S.templates[w.key]; if(!tp) continue;
+    L.push(`### ${w.label} v${tp.v||1}`, `Warm-up (${tp.warmup.minutes||0} min): ${tp.warmup.text||'-'}`);
+    tp.exercises.forEach(e=>L.push(`- ${e.name} [${e.muscle}]: ${e.warm?e.warm+' warm-up + ':''}${e.sets} x ${e.target}, rest ${e.rest} s${e.info?` · ${e.info}`:''}`)); }
+  return L.join('\n');
+}
+async function coachStatus(){
+  if(!wOn()){ coachStat={online:false, noServer:true}; return; }
+  try{ coachStat = await (await wApi('/coach/status')).json(); }catch(e){ coachStat={online:false, error:e.message}; }
+  if(VIEW==='coach'){ const el=$('#coachHead'); if(el) el.outerHTML=coachHead(); }
+}
+async function coachSend(){
+  const box=$('#coachIn'), text=(box? box.value : coachDraft).trim(); if(!text) return;
+  if(!wOn()){ toast('Set the server address and key first (Settings → Home-screen buttons)'); return; }
+  let c=cChat(coachChat);
+  if(c && c.msgs.some(m=>m.pending)){ toast('Wait for the answer (or stop it)'); return; }
+  if(!c){ c={id:uid(), title:text.slice(0,48), session:null, created:Date.now(), msgs:[]}; C.chats.unshift(c); coachChat=c.id; }
+  const job={id:uid(), chat:c.id, title:c.title, session:c.session, prompt:text, model:C.model, effort:C.effort, files:coachFiles()};
+  c.msgs.push({role:'user', text, at:Date.now()});
+  c.msgs.push({role:'coach', job:job.id, text:'', tools:[], pending:true, model:C.model, effort:C.effort, at:Date.now()});
+  c.updated=Date.now(); coachDraft=''; cSave(); render(); coachScroll();
+  try{
+    const r=await (await wApi('/coach/send', {job})).json();
+    if(!r.ok) throw new Error(r.error==='offline'? 'Your PC is offline. Start the coach bridge on the PC (coach/README.md).' : r.error||'failed');
+    coachPoll(c.id, job.id);
+  }catch(e){ coachFinish(c.id, job.id, {done:true, error:e.message}); }
+}
+function coachFinish(chatId, jobId, j){
+  const c=cChat(chatId); if(!c) return; const m=c.msgs.find(x=>x.job===jobId); if(!m) return;
+  if(j.text!=null) m.text=j.text; if(j.tools) m.tools=j.tools;
+  if(j.session) c.session=j.session;
+  if(j.done){ m.pending=false; if(j.error) m.error=j.error; if(j.stopped) m.stopped=true; if(j.cost!=null) m.cost=j.cost; if(j.usage){ m.usage=j.usage; c.ctx=j.usage.ctx; } if(j.limit && coachStat) coachStat.limit=j.limit; }
+  cSave();
+  if(VIEW==='coach' && coachChat===chatId){
+    const el=document.getElementById('cm-'+jobId);
+    const near = window.innerHeight+window.scrollY >= document.body.scrollHeight-120;
+    if(el){ el.outerHTML=coachMsgHtml(m); if(j.done) render(); if(near) coachScroll(); } else render();
+  }
+}
+async function coachPoll(chatId, jobId){
+  if(coachPolling.has(jobId)) return; coachPolling.add(jobId);
+  let misses=0;
+  try{
+    for(;;){
+      await new Promise(r=>setTimeout(r, document.hidden? 3000 : 800));
+      let j; try{ j=await (await wApi('/coach/job?id='+encodeURIComponent(jobId))).json(); misses=0; }
+      catch(e){ if(++misses>40){ coachFinish(chatId, jobId, {done:true, error:'No connection to the server'}); break; } continue; }
+      if(j.missing){ coachFinish(chatId, jobId, {done:true, error:'The answer is gone from the server'}); break; }
+      coachFinish(chatId, jobId, j);
+      if(j.done) break;
+    }
+  } finally { coachPolling.delete(jobId); }
+}
+function coachResume(){ C.chats.forEach(c=>c.msgs.forEach(m=>{ if(m.pending && m.job) coachPoll(c.id, m.job); })); }
+async function coachStop(){
+  const c=cChat(coachChat), m=c && c.msgs.find(x=>x.pending); if(!m) return;
+  try{ await wApi('/coach/stop', {id:m.job}); }catch(e){}
+  coachFinish(c.id, m.job, {done:true, stopped:true});
+}
+function coachScroll(){ requestAnimationFrame(()=>window.scrollTo(0, document.body.scrollHeight)); }
+// small, safe Markdown: the text is escaped first, then **bold**, `code`, headings, lists, tables as plain rows
+function coachMd(src){
+  const inline = s => s.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/(^|[\s(])\*([^*\s][^*]*)\*/g,'$1<i>$2</i>');
+  const out=[]; let list=null;
+  const close=()=>{ if(list){ out.push(`</${list}>`); list=null; } };
+  for(const raw of esc(src).split('\n')){
+    const l=raw.trimEnd(); let m;
+    if(/^\s*\|?\s*:?-{3,}/.test(l)) continue; // table separator line
+    if((m=l.match(/^#{1,4}\s+(.*)/))){ close(); out.push(`<h3>${inline(m[1])}</h3>`); continue; }
+    if((m=l.match(/^\s*[-*•]\s+(.*)/))){ if(list!=='ul'){ close(); out.push('<ul>'); list='ul'; } out.push(`<li>${inline(m[1])}</li>`); continue; }
+    if((m=l.match(/^\s*\d+[.)]\s+(.*)/))){ if(list!=='ol'){ close(); out.push('<ol>'); list='ol'; } out.push(`<li>${inline(m[1])}</li>`); continue; }
+    close();
+    if(!l.trim()){ out.push('<div class="gap"></div>'); continue; }
+    if(/^\|.*\|$/.test(l.trim())){ out.push(`<div class="trow">${l.trim().slice(1,-1).split('|').map(x=>`<span>${inline(x.trim())}</span>`).join('')}</div>`); continue; }
+    out.push(`<p>${inline(l)}</p>`);
+  }
+  close(); return out.join('');
+}
+function coachMsgHtml(m){
+  if(m.role==='user') return `<div class="cmsg me"><div class="bub">${esc(m.text).replace(/\n/g,'<br>')}</div></div>`;
+  const tools = (m.tools||[]).length? `<details class="ctools"${m.pending&&!m.text?' open':''}><summary>${m.tools.length} step${m.tools.length>1?'s':''}: ${esc(m.tools[m.tools.length-1])}</summary>${m.tools.map(x=>`<div>· ${esc(x)}</div>`).join('')}</details>` : '';
+  const body = m.text? coachMd(m.text) : m.pending? '<p class="muted">Thinking…</p>' : '';
+  const foot = m.error? `<div class="cerr">⚠ ${esc(m.error)}</div>` : m.stopped? '<div class="small muted">Stopped</div>'
+    : m.pending? '<div class="cdots"><i></i><i></i><i></i></div>'
+    : `<div class="small muted">${esc(modelLabel(m.model))} · ${esc(m.effort||'')}${m.usage? ` · ${fmtTok(m.usage.tin)} in (${fmtTok(m.usage.ctx)} context) · ${fmtTok(m.usage.out)} out` : ''}${m.cost? ` · ≈ $${m.cost.toFixed(m.cost<0.1?3:2)} API value` : ''}</div>`;
+  return `<div class="cmsg coach" id="cm-${m.job}">${tools}<div class="bub">${body}</div>${foot}</div>`;
+}
+const fmtTok = n => !n? '0' : n>=1000? (n/1000).toFixed(n>=10000?0:1)+'k' : String(n);
+// what one more message in this chat costs: the whole context is read again (mostly from cache)
+function coachCtxHtml(c){
+  if(!c || !c.ctx) return '';
+  const cost=c.msgs.reduce((a,m)=>a+(m.cost||0),0), big=c.ctx>80000;
+  return `<p class="small ${big?'':'muted'}" style="margin:0 0 10px;${big?'color:var(--warn)':''}">Context ${fmtTok(c.ctx)} tokens · this chat so far ≈ $${cost.toFixed(2)} API value (your subscription, not billed). Every follow-up reads the whole context again${big?': for a new topic start a new chat, the coach can still look up this one':''}.</p>`;
+}
+// subscription usage from the last answer: session (5 h) and week, each with a bar and the time until reset
+const LIMIT_NAMES = {five_hour:'Session (5 h)', seven_day:'Week', seven_day_opus:'Week (Opus)', seven_day_sonnet:'Week (Sonnet)'};
+function untilTxt(ms){ const m=Math.max(0, Math.round(ms/60000)); if(m<60) return m+' min'; const h=Math.floor(m/60); return h<48? `${h} h ${m%60} min` : `${Math.floor(h/24)} d ${h%24} h`; }
+function coachLimits(l){
+  if(!l || !l.windows) return '';
+  const rows=Object.entries(l.windows).map(([k,w])=>{ const p=Math.round((w.u||0)*100), over=w.reset && w.reset<Date.now();
+    const col = over? 'var(--good)' : p>=90? 'var(--bad)' : p>=70? 'var(--warn)' : 'var(--accent)';
+    return `<div class="climit"><div class="row between small"><b>${esc(LIMIT_NAMES[k]||k)}</b><span class="muted">${over? 'reset ✓' : `${p} % · resets in ${untilTxt(w.reset-Date.now())}`}</span></div>
+      <div class="cbar"><i style="width:${over?0:Math.min(100,p)}%;background:${col}"></i></div></div>`; }).join('');
+  return `<div class="card" style="padding:10px 12px;margin:8px 0 0">${rows}<div class="small muted" style="margin-top:4px">Claude subscription usage, as of ${fmtTime(l.at)}</div></div>`;
+}
+function coachHead(){
+  const s=coachStat;
+  const dot = !s? '<span class="pill">checking…</span>' : s.noServer? '<span class="pill" style="color:var(--warn)">no server set</span>'
+    : s.online? `<span class="pill" style="color:var(--good)">● PC online${s.busy?' · busy':''}</span>` : '<span class="pill" style="color:var(--bad)">● PC offline</span>';
+  return `<div id="coachHead" style="margin:-4px 0 10px"><div class="row wrap" style="gap:6px">${dot}<button class="link" data-act="coachRefresh">⟳</button></div>${coachLimits(s && s.limit)}</div>`;
+}
+function coachPickers(){
+  return `<div class="cpick"><select data-coach="model">${COACH_MODELS.map(([k,l])=>`<option value="${k}" ${C.model===k?'selected':''}>${l}</option>`).join('')}</select>
+    <select data-coach="effort">${COACH_EFFORTS.map(e=>`<option value="${e}" ${C.effort===e?'selected':''}>effort: ${e}</option>`).join('')}</select></div>`;
+}
+function viewCoach(){
+  if(!coachStat) setTimeout(coachStatus, 0);
+  const c=cChat(coachChat);
+  if(!c && coachChat!=='new'){
+    const list=C.chats.map(x=>{ const last=x.msgs[x.msgs.length-1];
+      return `<div class="list-item" data-act="coachOpen" data-v="${x.id}" style="cursor:pointer"><div style="flex:1;min-width:0"><b class="ell">${esc(x.title)}</b>
+        <div class="small muted ell">${last? esc((last.role==='user'?'You: ':'')+(last.text||'…').replace(/\s+/g,' ').slice(0,80)) : ''}</div></div>
+        <span class="small muted">${new Date(x.updated||x.created).toLocaleDateString('de-CH',{day:'numeric',month:'numeric'})}</span></div>`; }).join('');
+    return `<h1>Coach</h1>${coachHead()}
+      <button class="primary big" data-act="coachNew">＋ New chat</button>
+      <div class="card" style="margin-top:12px">${list || '<div class="empty">No chats yet. Ask about your training, a plan, an exercise, a pain…</div>'}</div>
+      <p class="small muted">Your coach is Claude Code on your PC (your subscription). Every chat is a new session; it sees your whole training record and can look into your earlier chats. Setup: <code>coach/README.md</code> in the repo.</p>`;
+  }
+  const msgs = c? c.msgs : [], busy = msgs.some(m=>m.pending);
+  return `<div class="row between" style="margin-bottom:6px"><button class="link" data-act="coachBack">‹ Chats</button>
+      ${c? '<button class="link" style="color:var(--bad)" data-act="coachDel">Delete chat</button>' : ''}</div>
+    <h2 class="ell" style="margin:0 0 6px">${c? esc(c.title) : 'New chat'}</h2>${coachHead()}${coachCtxHtml(c)}
+    <div class="cthread">${msgs.map(coachMsgHtml).join('') || '<div class="empty">What do you want to talk about?</div>'}</div>
+    <div class="ccompose">${coachPickers()}
+      <textarea id="coachIn" class="auto" rows="1" placeholder="Message your coach">${esc(coachDraft)}</textarea>
+      ${busy? '<button class="danger big" data-act="coachStop">■ Stop</button>' : '<button class="primary big" data-act="coachSend">Send</button>'}</div>`;
+}
 
 /* ---- Apple Shortcuts bridges (iCloud Drive backup, Apple Health) ---- */
 function runShortcut(name, input, text){
@@ -662,6 +850,7 @@ const ICONS = {
   workout:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/></svg>',
   history:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   stats:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  coach:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>',
   settings:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
 };
 function renderTabs(){
@@ -669,7 +858,7 @@ function renderTabs(){
   const off = !S.profile.onboarded || !!S.active;
   document.body.classList.toggle('notabs', off);
   if(off){ $('#tabs').innerHTML=''; return; }
-  const tabs = [['today','Today'],...(S.active?[['workout','Workout']]:[]),['history','History'],['stats','Stats'],['settings','Settings']];
+  const tabs = [['today','Today'],...(S.active?[['workout','Workout']]:[]),['history','History'],['stats','Stats'],['coach','Coach'],['settings','Settings']];
   $('#tabs').innerHTML = tabs.map(([k,l])=>`<button data-act="tab" data-v="${k}" class="${VIEW===k?'on':''}">${ICONS[k]}${l}</button>`).join('');
 }
 function render(){
@@ -677,7 +866,7 @@ function render(){
   else if(VIEW==='workout') VIEW='today';
   applyTheme(); renderTabs(); wakeSync();
   if(!S.profile.onboarded){ $('#app').innerHTML = viewOnboarding(); renderTimer(); return; }
-  $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, settings:viewSettings}[VIEW]||viewToday)();
+  $('#app').innerHTML = updateBanner() + ({today:viewToday, workout:viewWorkout, history:viewHistory, stats:viewStats, coach:viewCoach, settings:viewSettings}[VIEW]||viewToday)();
   if (VIEW==='stats') mountCharts();
   renderTimer(); tick(); growAll($('#app'));
   if (VIEW==='workout') afterWorkoutRender();
@@ -2141,7 +2330,15 @@ document.addEventListener('click', ev=>{
   const a=t.dataset.act, v=t.dataset.v, W=S.active;
   if(a==='modalBg'){ if(ev.target===t) closeModal(); return; }
   switch(a){
-    case 'tab': go(v); break;
+    case 'tab': if(v==='coach') coachStatus(); go(v); break;
+    // coach
+    case 'coachNew': coachChat='new'; coachDraft=''; go('coach'); setTimeout(()=>{ const b=$('#coachIn'); if(b) b.focus(); }, 50); break;
+    case 'coachOpen': coachChat=v; coachDraft=''; render(); coachScroll(); break;
+    case 'coachBack': coachChat=null; go('coach'); break;
+    case 'coachSend': coachSend(); break;
+    case 'coachStop': coachStop(); break;
+    case 'coachRefresh': coachStat=null; render(); break;
+    case 'coachDel': if(confirm('Delete this chat on the phone? (The session stays on your PC.)')){ C.chats=C.chats.filter(c=>c.id!==coachChat); cSave(); coachChat=null; go('coach'); } break;
     // welcome wizard
     case 'obNext': obNext(); break;
     case 'obBack': S.profile.obStep=Math.max(0,(S.profile.obStep||0)-1); save(false); render(); break;
@@ -2331,6 +2528,7 @@ document.addEventListener('input', ev=>{
   else if(t.dataset.pre && W){ W.pre=W.pre||{}; W.pre[t.dataset.pre]=t.value; save(); }
   else if(t.dataset.post && W){ W.post=W.post||{}; W.post[t.dataset.post]=t.value; save(); }
   else if(t.hasAttribute('data-notes') && W){ W.notes=t.value; save(); }
+  else if(t.id==='coachIn'){ coachDraft=t.value; }
   else if(t.dataset.prof){ S.profile[t.dataset.prof]=t.value; save(); }
   else if(t.dataset.set){ const k=t.dataset.set; S.settings[k] = k==='step'? (num(t.value)||0.25) : k==='progStep'? (num(t.value)||1) : t.value; save(false); }
 });
@@ -2338,6 +2536,7 @@ document.addEventListener('change', ev=>{
   const t=ev.target;
   if(t.dataset.te!=null && tplEd){ tplEdInput(t); if(t.tagName==='SELECT') render(); return; }
   if(t.id==='exSel'){ statsEx=t.value; render(); }
+  if(t.dataset.coach){ C[t.dataset.coach]=t.value; cSave(); }
   if(t.dataset.rot!=null){ S.settings.rotation[+t.dataset.rot]=t.value; S.settings.nextOverride=null; save(); render(); }
   if((t.id==='importFile' || t.id==='verifyFile') && t.files[0]){
     const r=new FileReader();
@@ -2362,6 +2561,6 @@ document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ S = loa
 document.addEventListener('touchcancel',()=>{ if(sh){ sh.d=0; sheetEnd(); } woPull=null; if(ptr){ ptr=null; ptrShow(0); } });
 
 render();
-wFg(true); wPull(); wSync();
+wFg(true); wPull(); wSync(); coachResume();
 window.__gymBooted = true; // tells the loader this version started fine
 if(window.GymLoader && GymLoader.justUpdated) setTimeout(()=>toast('Updated to the latest version ✓'), 300);

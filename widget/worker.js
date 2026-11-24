@@ -198,6 +198,7 @@ export class GymDO {
   async fetch(req){
     const url=new URL(req.url), p=url.pathname, now=Date.now();
     const body = req.method==='POST' ? await req.json().catch(()=>({})) : {};
+    if(p.startsWith('/coach/')) return this.coach(req, url, p, body, now);
     let snap=await this.get('snap', null), ops=await this.get('ops', []);
 
     if(p==='/next'){
@@ -238,6 +239,57 @@ export class GymDO {
     if(p==='/widget'){ const v=view(snap, now); return json({...v, set:undefined, w:v.set&&v.set.w, r:v.set&&v.set.r}); }
     return text('Not found', 404);
   }
+  /* ---------- Coach relay: phone <-> your PC (coach/bridge.mjs runs Claude Code there) ----------
+     The PC keeps a WebSocket open to /coach/pc (hibernating, "ping" is answered without waking the object).
+     POST /coach/send {job}  -> forwards the job (prompt, model, effort, session, training files) to the PC.
+                               The training files are NOT stored here, they only pass through.
+     GET  /coach/job?id=     -> the answer so far {text, tools, session, done, error, stopped, cost, limit}
+     POST /coach/stop {id}   -> stop that answer;  GET /coach/status -> is the PC online (+ models, usage) */
+  pc(){ return this.state.getWebSockets('pc')[0] || null; }
+  async coach(req, url, p, body, now){
+    if(p==='/coach/pc'){
+      if(req.headers.get('Upgrade')!=='websocket') return text('Expected a WebSocket', 426);
+      for(const old of this.state.getWebSockets('pc')) try{ old.close(4000, 'replaced by a new connection'); }catch(e){}
+      const pair=new WebSocketPair();
+      this.state.acceptWebSocket(pair[1], ['pc']);
+      this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+      return new Response(null, {status:101, webSocket:pair[0]});
+    }
+    if(p==='/coach/status'){ const ws=this.pc(); let info={}; try{ info=(ws && ws.deserializeAttachment()) || {}; }catch(e){}
+      return json({online:!!ws, ...info}); }
+    if(p==='/coach/send'){
+      const job=body.job||{}; if(!job.id || !job.prompt) return json({ok:false, error:'Empty message'}, 400);
+      const ws=this.pc(); if(!ws) return json({ok:false, error:'offline'});
+      await this.st.put('job:'+job.id, {id:job.id, text:'', tools:[], session:job.session||null, done:false, at:now});
+      const ids=(await this.get('jobs', [])).filter(x=>x!==job.id); ids.push(job.id);
+      if(ids.length>30) await this.st.delete(ids.splice(0, ids.length-30).map(x=>'job:'+x));
+      await this.st.put('jobs', ids);
+      try{ ws.send(JSON.stringify({t:'job', job})); }catch(e){ return json({ok:false, error:'offline'}); }
+      return json({ok:true});
+    }
+    if(p==='/coach/job'){ const j=await this.get('job:'+url.searchParams.get('id'), null); return json(j || {missing:true}); }
+    if(p==='/coach/stop'){ const ws=this.pc(); if(ws) try{ ws.send(JSON.stringify({t:'stop', id:body.id})); }catch(e){} return json({ok:!!ws}); }
+    return text('Not found', 404);
+  }
+  async webSocketMessage(ws, msg){
+    let m; try{ m=JSON.parse(msg); }catch(e){ return; }
+    if(m.t==='hello'){ ws.serializeAttachment({host:String(m.host||'').slice(0,60), models:m.models, efforts:m.efforts, busy:m.busy||0, limit:m.limit||null, at:Date.now()}); return; }
+    if(m.t==='ev'){
+      const k='job:'+m.id, j=await this.get(k, null); if(!j) return;
+      if(m.add!=null) j.text=j.text.slice(0, m.from||0) + m.add;
+      if(m.tools) j.tools=m.tools.slice(-40); if(m.session) j.session=m.session;
+      if(m.done){ j.done=true; for(const f of ['error','stopped','cost','ms','limit','usage']) if(m[f]!=null) j[f]=m[f]; }
+      j.at=Date.now(); await this.st.put(k, j);
+    }
+  }
+  async webSocketClose(ws, code){
+    try{ ws.close(); }catch(e){}
+    if(this.pc()) return; // a newer connection took over
+    // the PC went away: answers still running can't finish any more
+    for(const id of await this.get('jobs', [])){ const j=await this.get('job:'+id, null);
+      if(j && !j.done){ j.done=true; j.error='Your PC went offline while answering'; await this.st.put('job:'+id, j); } }
+  }
+  async webSocketError(ws){ await this.webSocketClose(ws, 1011); }
   async schedule(snap){
     const ev=restEvents(snap, Date.now()), sent=await this.get('sent', []);
     const todo=ev.filter(e=>!sent.includes(e.key));
