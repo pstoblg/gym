@@ -71,7 +71,7 @@ function defaultState(){
     templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)), tplHistory: {},
     planPins: {}, moves: [],
     sessions: [], bodyweight: [], active: null, healthPending: null, lastChange: 0,
-    work: {}, // date → {h: hours (decimal), src: what was typed, e.g. "7-17"}
+    work: {}, // old work-hours log (feature removed; kept so logged data stays in backups)
     wAck: 0,  // last home-screen button press (op id) already applied
   };
 }
@@ -343,8 +343,6 @@ function coachLog(){
     if(s.notes) L.push(`Notes: ${s.notes}`);
   }
   L.push('', `## Bodyweight (kg)`, S.bodyweight.slice().sort((a,b)=>a.date<b.date?1:-1).map(b=>`${b.date}: ${fw(b.kg)}`).join(' | ') || '-');
-  const wk=Object.entries(S.work).sort((a,b)=>a[0]<b[0]?1:-1);
-  L.push('', `## Work hours`, wk.map(([d,w])=>`${d}: ${w.h} h`).join(' | ') || '-');
   L.push('', `## Current templates`);
   for(const w of WORKOUTS){ const tp=S.templates[w.key]; if(!tp) continue;
     L.push(`### ${w.label} v${tp.v||1}`, `Warm-up (${tp.warmup.minutes||0} min): ${tp.warmup.text||'-'}`);
@@ -936,41 +934,6 @@ function obNext(){
   p.obStep++; save(); window.scrollTo(0,0); render();
 }
 
-/* ================= WORK HOURS =================
-   Typed as a time range ("7-17", "7:30-17:15", "7.30–16") or as hours ("10", "8.5", "8,5", "8:30"). "off" / "0" = no work. */
-function parseWork(txt){
-  const t=String(txt||'').trim().toLowerCase().replace(/\s+/g,'').replace(/[–—]/g,'-').replace(/bis|to/g,'-').replace(/h$/,'');
-  if(!t) return null;
-  if(/^(off|frei|0)$/.test(t)) return {h:0, src:'off'};
-  const time = x => { const m=x.match(/^(\d{1,2})(?:[:.h](\d{2}))?$/); if(!m) return NaN; const h=+m[1], mi=+(m[2]||0); return h<=24 && mi<60? h+mi/60 : NaN; };
-  const r=t.match(/^([\d:.h]+)-([\d:.h]+)$/);
-  if(r){ const a=time(r[1]), b=time(r[2]); if(!isFinite(a)||!isFinite(b)) return null;
-    let h=b-a; if(h<0) h+=24; return {h:Math.round(h*100)/100, src:String(txt).trim()}; }
-  let h;
-  if(/^\d{1,2}:\d{2}$/.test(t)){ const [a,b]=t.split(':'); h=+a + +b/60; }
-  else h=num(t);
-  if(!isFinite(h) || h<0 || h>24 || !/^[\d.,:]+$/.test(t)) return null;
-  return {h:Math.round(h*100)/100, src:String(txt).trim()};
-}
-const fmtH = h => (Math.round(h*100)/100).toString()+' h';
-const workOf = d => S.work[d];
-const isWorkDay = d => S.settings.workDays.includes(parseISO(d).getDay());
-const workLabel = w => !w? '' : w.h===0? 'No work' : fmtH(w.h)+(/-/.test(w.src)? ' ('+esc(w.src)+')' : '');
-// past work days (since the feature started, at most 60 days back) without work hours
-function workMissing(){
-  if(!S.settings.workTrack) return [];
-  const out=[], today=iso(); let d=S.settings.workSince > addDays(today,-60)? S.settings.workSince : addDays(today,-60);
-  for(; d<today; d=addDays(d,1)) if(isWorkDay(d) && !workOf(d)) out.push(d);
-  return out;
-}
-function workSave(d, txt){
-  const w=parseWork(txt);
-  if(!w){ toast('Enter hours like 8.5, or a time like 7-17'); return false; }
-  S.work[d]=w; save(); return true;
-}
-const workInput = (d, cls) => { const w=workOf(d);
-  return `<span class="row wkrow ${cls||''}"><input id="wk-${d}" class="wkin" placeholder="7-17 or 8.5" value="${w? esc(w.h===0?'off':w.src) : ''}"><button class="small" data-act="workSave" data-v="${d}">Save</button><button class="small ghost" data-act="workOff" data-v="${d}">Off</button></span>`; };
-
 /* ================= TODAY ================= */
 function dayMarks(list){ return list.map(s=> s.activity? '<span class="muted">○</span>' : s.status==='done'?`<span class="t-${s.type}">●</span>`:'<span style="color:var(--bad)">✕</span>').join(''); }
 // Marker for one day: logged entries, the planned workout (future), or a "?" for a past training day without entry
@@ -990,13 +953,12 @@ function calCell(ds, planMap, missing, showMonth){
   let cls = list.some(s=>s.status==='done')? 'cd' : list.length? 'cs' : movedFrom? 'cm' : '';
   if(!list.length && !movedFrom && ds>=today && p && p.key && p.key!=='rest') cls += ' up';
   if(missing.includes(ds)) cls += ' tolog';
-  if(S.settings.workTrack && ds<today && ds>=S.settings.workSince && isWorkDay(ds) && !workOf(ds)) cls += ' wk';
   const cell = (ds<today && !S.sessions.some(s=>s.date===ds) && !missing.includes(ds) && !movedFrom)? '' : dayCell(ds, planMap, missing);
   const dd=parseISO(ds), label = showMonth && dd.getDate()===1? `${dd.getDate()}.${dd.getMonth()+1}.` : dd.getDate();
   return `<div class="c ${cls} ${ds===today?'today':''}" data-act="day" data-v="${ds}"><div>${label}</div><div class="st">${cell}</div></div>`;
 }
 const CAL_HEAD = ['Mo','Tu','We','Th','Fr','Sa','Su'].map(d=>`<div class="h">${d}</div>`).join('');
-const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:var(--good-soft)"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 25%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span><i style="box-shadow:inset 0 -3px 0 var(--warn)"></i>Work hours missing</span><span>📌 fixed</span></div>`;
+const CAL_LEGEND = `<div class="legend" style="margin:8px 0 0"><span><i style="background:var(--good-soft)"></i>Trained</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--card2))"></i>Skipped</span><span><i style="background:color-mix(in srgb,var(--warn) 25%,var(--card2))"></i>Moved</span><span><i style="border:1.5px dashed var(--muted)"></i>Planned</span><span><i style="border:1.5px dashed var(--bad)"></i>To log</span><span>📌 fixed</span></div>`;
 function planMapUntil(lastDate){ const n=daysBetween(iso(), lastDate); const m={}; if(n>=0) planDays(n+1).forEach(p=>m[p.date]=p); return m; }
 function greeting(){ const h=new Date().getHours(); return h<11?'Good morning':h<17?'Hi':'Good evening'; }
 function viewToday(){
@@ -1013,10 +975,6 @@ function viewToday(){
     ${missing.slice(0,4).map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>
       <span class="row"><button class="small no" data-act="missSkip" data-v="${d}">Skipped</button><button class="small" data-act="manualOpen" data-v="${d}">Trained</button><button class="small mvbtn" data-act="moveOpen" data-v="${d}">Moved</button></span></div>`).join('')}
     <button class="link" style="font-size:12px" data-act="missRest" data-v="${missing[0]}">${fmtDate(missing[0])} was planned wrong, it was a rest day</button></div>`;
-  const wm = workMissing();
-  if(wm.length && !S.active) banner += `<div class="card" style="border-color:var(--warn)"><b style="color:var(--warn)">Work hours to log: ${wm.length} day${wm.length>1?'s':''}</b>
-    <p class="small ink2" style="margin:4px 0 6px">Time at work, e.g. <b>7-17</b> (= 10 h) or <b>8.5</b>. "Off" if you didn't work.${wm.length>5?' Showing the oldest 5; the rest have an orange line in the calendar.':''}</p>
-    ${wm.slice(0,5).map(d=>`<div class="row between wrap" style="padding:6px 0;border-top:1px solid var(--line)"><span class="small"><b>${fmtDate(d)}</b></span>${workInput(d)}</div>`).join('')}</div>`;
   if(!S.active && !S.settings.backupToken) banner += `<div class="card row between" style="border-color:var(--warn)"><div class="small"><b>No iCloud backup yet</b><br><span class="muted">Make sure your data is safe.</span></div><button class="primary" data-act="tab" data-v="settings">Set up</button></div>`;
   else if(!S.active && !icloudDirty() && backupUnchecked()) banner += `<div class="card row between" style="border-color:var(--accent)"><div class="small"><b>Backup saved ${fmtTime(S.settings.backupSavedAt||S.settings.icloudLast)}</b><br><span class="muted">Check that it arrived complete in iCloud.</span></div><button class="primary" data-act="bkVerify">✓ Check</button></div>`;
   else if(!S.active && icloudDirty()) banner += `<div class="card row between" style="border-color:var(--warn)">
@@ -1056,10 +1014,8 @@ function viewToday(){
       ${!rest? '<button class="link" data-act="moveOpen" data-v="'+today+'">↔ Move today’s workout to a rest day</button>' : ''}
     </div>`;
   }
-  const runs = longRuns(20), tw = workOf(today);
-  const workCard = !S.settings.workTrack || (!isWorkDay(today) && !tw)? '' : `<div class="card"><div class="row between wrap"><h2 style="margin:0">💼 Work today</h2>
-    ${tw? `<span class="row"><b>${workLabel(tw)}</b><button class="small ghost" data-act="day" data-v="${today}">Change</button></span>` : workInput(today)}</div></div>`;
-  return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}${workCard}
+  const runs = longRuns(20);
+  return `<h1>${greeting()}${S.profile.name?', '+esc(S.profile.name):''}</h1>${banner}${healthPasteBtn()}${main}
   <div class="card">
     <div class="row between" style="margin-bottom:8px"><h2 style="margin:0">Next 3 weeks</h2><button class="small ghost" data-act="monthView">📅 Month</button></div>
     <div class="cal">${cells}</div>
@@ -1848,11 +1804,8 @@ function daySheet(date){
       <button class="no" data-act="missSkip" data-v="${date}">Skipped</button><button data-act="manualOpen" data-v="${date}">Trained</button><button class="mvbtn" data-act="moveOpen" data-v="${date}">Moved</button></div>
       <button class="link" style="font-size:12px" data-act="missRest" data-v="${date}">It was planned wrong, it was a rest day</button></div>`;
   }
-  const w=workOf(date), wkMiss = S.settings.workTrack && date<today && date>=S.settings.workSince && isWorkDay(date) && !w;
-  const workHtml = date>today? '' : `<div class="card" ${wkMiss?'style="border-color:var(--warn)"':''}><div class="row between wrap"><b>💼 Work${w?': '+workLabel(w):''}</b>${workInput(date)}</div>
-    ${wkMiss?'<p class="small" style="color:var(--warn);margin:6px 0 0">Work hours missing for this day.</p>':''}</div>`;
   return `<div class="row between"><h2 style="margin:0">${fmtDate(date)} ${date.slice(0,4)}</h2><button class="icon" data-act="closeModal">✕</button></div>
-  <div style="margin-top:12px">${workHtml}${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
+  <div style="margin-top:12px">${planHtml}${list.map(sessionDetail).join('') || (planHtml && date>=today? '' : `<div class="empty">${isRestDay(date)?'Rest day. ':''}Nothing logged.</div>`)}</div>
   <button class="ghost big" data-act="manualOpen" data-v="${date}">+ Add entry for this day</button>`;
 }
 
@@ -2132,12 +2085,6 @@ function viewSettings(){
       <button class="${st.wPush?'':'primary'}" data-act="wPushOn">${st.wPush?'Notifications on ✓':'Turn on notifications'}</button></div>
     ${st.wPush?'<button class="link" data-act="wPushTest">Send a test notification</button>':''}
   </div>
-  <div class="card"><h2>💼 Work hours</h2>
-    <p class="small ink2" style="margin:0 0 6px">Log the time you were at work each day (e.g. 7-17 = 10 h). Work days without hours get an orange line in the calendar and show up on Today until you fill them in.</p>
-    <div class="chips"><button class="chip ${st.workTrack?'on':''}" data-act="workTrack" data-v="1">On</button><button class="chip ${!st.workTrack?'on':''}" data-act="workTrack" data-v="0">Off</button></div>
-    ${st.workTrack?`<label class="f">Work days</label><div class="chips">${[1,2,3,4,5,6,0].map(d=>`<button class="chip ${st.workDays.includes(d)?'on':''}" data-act="workDay" data-v="${d}">${DOW[d]}</button>`).join('')}</div>`:''}
-  </div>
-  <div class="card"><h2>General</h2>
     <label class="f">Weight step for +/− buttons (kg)</label><input data-set="step" inputmode="decimal" value="${fw(st.step)}">
     <label class="f">Weight increase when all sets hit the top of the rep range (kg)</label><input data-set="progStep" inputmode="decimal" value="${fw(st.progStep)}">
     <label class="f">Keep the screen on during a workout</label>
@@ -2227,7 +2174,6 @@ const MANUAL = [
   {id:'start', title:'🏠 Today', items:[
     {id:'today', title:'Today screen', where:'Today', text:'Shows today’s plan (or "Rest"), Start workout, Log skip and "Move today’s workout". Once you trained today, the big title is your NEXT workout with its day (e.g. "Push – On Thursday"), and only a small "+ Another workout or activity" link stays. Below: the calendar for this and next week, your skip counter and bodyweight. Pull down at the top to refresh (also checks for a new version).'},
     {id:'homebtn', title:'Home-screen buttons & rest notifications', where:'Settings → 📱 Home-screen buttons', text:'Two Shortcuts on the home screen (or in Control Center). "Gym Next" does the next one-button step of a running workout: warm-up done, I’m at the machine, start set, set done, yes I’ll stretch, start stretching, done stretching. It never starts a workout; for “No” to stretching and the last questions open the app. Its answer comes as a Gym notification: title “Gym – exercise”, then what happened (e.g. Set 2/3 started · 60 kg × 8), and the last line “Next = …” says what the next press does. A notification also comes 10 s before the rest is over and when it is over (only while the app is closed; in the app you hear a short beep at 10 s). When you open the app, all button presses are applied with their exact times. The first time you leave the app during a workout, one notification says you can lock the phone. ("Gym Status" still works if you set it up, but you don’t need it.) After the workout is saved, nothing of it stays on the server. Needs your own free Cloudflare server: setup in widget/README.md of the app\'s code.'},
-    {id:'work', title:'Work hours', where:'Today → 💼 Work today · tap a day', text:'Type the time you were at work, e.g. 7-17 (= 10 h), 7:30-16:15, or just hours like 8.5. "Off" = no work. Work days without hours get an orange line in the calendar and are listed on Today until filled in. Change any day by tapping it. Work days and on/off: Settings → Work hours.'},
     {id:'healthedit', title:'Change Apple Health data', where:'Tap a day → workout · Finish screen', text:'Apple Health data can always be fetched again (⟳ Get again), pasted again, edited by hand (✎ Edit) or removed.'},
     {id:'activity', title:'Other activities (golf, swimming …)', where:'Start workout → ⛳ Other activity', text:'Log anything that is not a gym workout: name, minutes, when you finished. It shows as ○ in the calendar and in History (with Apple Health data if you like), but never changes your training plan or counts as a planned workout.'},
     {id:'cal2w', title:'2-week calendar', where:'Today → This & next week', text:'Green = trained, red = skipped, amber ↔ = moved, dashed outline = planned (upcoming), red dashed "LOG" = planned training day in the past without an entry. 📌 = day fixed by hand. Tap any day to see, plan, move or log it. "📅 Month" opens the month view.'},
@@ -2444,10 +2390,6 @@ document.addEventListener('click', ev=>{
       wApi('/status').then(r=>r.text().then(x=>toast(r.ok? 'Connected ✓ '+x : 'Server: '+x))).catch(e=>toast('No connection: '+e.message)); wLastSent=''; wSync(); break;
     case 'wPushOn': wPushOn(); break;
     case 'wPushTest': wApi('/test', {}).then(r=>r.json()).then(r=>toast(r.sent? 'Sent ✓ (lock the phone to see it as a banner)' : 'Not sent: turn notifications on again')).catch(e=>toast('No connection: '+e.message)); break;
-    case 'workSave': { const el=document.getElementById('wk-'+v); if(el && workSave(v, el.value)){ const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); toast(fmtDate(v)+': '+(S.work[v].h? fmtH(S.work[v].h) : 'no work')); } break; }
-    case 'workOff': { S.work[v]={h:0, src:'off'}; save(); const d=dayOpen; if(d){ openModal(daySheet(d)); dayOpen=d; } render(); break; }
-    case 'workTrack': S.settings.workTrack = v==='1'; save(); render(); break;
-    case 'workDay': { const d=+v, r=S.settings.workDays; S.settings.workDays = r.includes(d)? r.filter(x=>x!==d) : [...r,d]; save(); render(); break; }
     case 'healthEdit': healthEditSheet(t.dataset.id); break;
     case 'healthEditCancel': { const d=dayOpen; closeModal(); if(d){ dayOpen=d; openModal(daySheet(d)); } break; }
     case 'healthEditSave': { const g=k=>Math.max(0, Math.round(num($('#he-'+k).value)));
