@@ -479,8 +479,8 @@ function viewCoach(){
     <h2 class="ell" style="margin:0 0 6px">${c? esc(c.title) : 'New chat'}</h2>${coachHead()}${coachCtxHtml(c)}
     <div class="cthread">${msgs.map(coachMsgHtml).join('') || '<div class="empty">What do you want to talk about?</div>'}</div>
     <div class="ccompose">${coachPickers()}
-      <textarea id="coachIn" class="auto" rows="1" placeholder="Message your coach">${esc(coachDraft)}</textarea>
-      ${busy? '<button class="danger big" data-act="coachStop">■ Stop</button>' : '<button class="primary big" data-act="coachSend">Send</button>'}</div>`;
+      <div class="crow"><textarea id="coachIn" class="auto" rows="1" placeholder="Message your coach">${esc(coachDraft)}</textarea>
+      ${busy? '<button class="danger" data-act="coachStop">■</button>' : '<button class="primary" data-act="coachSend">↑</button>'}</div></div>`;
 }
 
 /* ---- Apple Shortcuts bridges (iCloud Drive backup, Apple Health) ---- */

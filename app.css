@@ -324,10 +324,13 @@ body.notabs .dockbar{padding-bottom:max(8px, calc(env(safe-area-inset-bottom) - 
 .cdots i{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:cdot 1.2s infinite}
 .cdots i:nth-child(2){animation-delay:.2s}.cdots i:nth-child(3){animation-delay:.4s}
 @keyframes cdot{0%,80%,100%{opacity:.25}40%{opacity:1}}
-.ccompose{position:sticky;bottom:calc(64px + env(safe-area-inset-bottom));background:var(--bg);padding:8px 0 4px;display:flex;flex-direction:column;gap:8px}
-.ccompose textarea{min-height:44px;max-height:40vh;overflow:auto}
+/* the composer stays in the normal page flow (a sticky one covered the answer on the phone) */
+.ccompose{padding:4px 0 8px;display:flex;flex-direction:column;gap:6px}
+.crow{display:flex;gap:6px;align-items:flex-end}
+.crow textarea{flex:1;min-width:0;min-height:44px;max-height:40vh;overflow:auto}
+.crow button{width:48px;min-width:48px;height:44px;padding:0;font-size:20px;border-radius:12px}
 .cpick{display:flex;gap:6px}
-.cpick select{flex:1;min-width:0}
+.cpick select{flex:1;min-width:0;font-size:14px;padding-top:6px;padding-bottom:6px;min-height:36px}
 .climit{margin:2px 0 6px}
 .cbar{height:6px;border-radius:3px;background:var(--card2);overflow:hidden;margin-top:3px}
 .cbar i{display:block;height:100%;border-radius:3px}
