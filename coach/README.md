@@ -15,9 +15,9 @@ Gym app (Coach tab) --HTTPS--> gym-widget worker (/coach/*) <--WebSocket-- bridg
 
 ## Setup (once)
 1. Deploy the worker (`widget/`, `npx wrangler@4 deploy`). It is the same server and key as the home-screen buttons.
-2. Create `coach/config.local.json` (never committed):
+2. Create `coach/config.local.json` (never committed). `key` = a random PC key, also set on the worker as secret `PC_KEY` (`npx wrangler@4 secret put PC_KEY`); it only opens the PC connection, the app keeps its own KEY:
    ```json
-   {"url": "https://gym-widget.<name>.workers.dev", "key": "<the KEY from the app settings>"}
+   {"url": "https://gym-widget.<name>.workers.dev", "key": "<PC_KEY>"}
    ```
    Optional: `"dataDir"` (default `~/gym-coach`), `"claude"` (path to claude.exe, found automatically).
 3. Start it: double-click `start-coach.cmd` (restarts itself if it stops), or `node coach/bridge.mjs`.

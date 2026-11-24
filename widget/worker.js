@@ -29,7 +29,10 @@ export default {
   async fetch(req, env){
     if(req.method==='OPTIONS') return new Response(null, {headers:CORS});
     const url=new URL(req.url);
-    if(!env.KEY || url.searchParams.get('k')!==String(env.KEY).trim()) return text('Wrong or missing key', 401);
+    const k=url.searchParams.get('k');
+    // the PC (coach/bridge.mjs) has its own key PC_KEY, valid only for its WebSocket; the app's KEY works everywhere
+    const pcOk = url.pathname==='/coach/pc' && env.PC_KEY && k===String(env.PC_KEY).trim();
+    if(!pcOk && (!env.KEY || k!==String(env.KEY).trim())) return text('Wrong or missing key', 401);
     const id=env.GYM_DO.idFromName('me');
     return env.GYM_DO.get(id).fetch(req);
   }
