@@ -64,7 +64,7 @@ function defaultState(){
     v:5,
     profile:{ name:'', onboarded:false, obStep:0 },
     settings:{ rotation:[...TYPES], restDays:[4,0], skipAdvances:false, boulderEvery2nd:true, planStart:localToday(), maxInRow:0,
-      defaultRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
+      defaultRest:60, warmRest:60, wipSave:15, sound:true, nextOverride:null, theme:'auto',
       step:0.25, progStep:1, keepAwake:true, icloudAuto:true, icloudShortcut:'Gym Save', icloudLast:0, healthShortcut:'Gym Health',
       backupToken:null, backupVerified:0, workTrack:true, workDays:[1,2,3,4,5], workSince:localToday(),
       wUrl:'', wKey:'', wPush:false },
@@ -130,6 +130,8 @@ function migrate(s){
       s.templates[k]=n;
     }
   }
+  if(s.settings.warmRest==null) s.settings.warmRest = 60; // rest after a warm-up set, same for every exercise
+  s.alts = s.alts || {}; // alternatives per template exercise: {[template name]: [{name, info, kind, muscle}]}, last used first
   s.v = 5;
   return s;
 }
@@ -186,7 +188,7 @@ function wApi(path, body){
 function wEx(e, i){
   const u = e.kind==='time'? ' s' : e.kind==='dur'? ' min' : '';
   const ph = progressHint(e); // recommended heavier weight, shown in the notifications too
-  return {exIdx:i, name:e.name, rest:e.rest||0, up: ph? ph.to : null,
+  return {exIdx:i, name:e.name, rest:e.rest||0, wrest:S.settings.warmRest ?? 60, up: ph? ph.to : null,
     sets:e.sets.map(x=>({w:hasWeight(e)? num(x.w) : 0, r:String(x.r??''), u, warm:!!x.warm, start:x.start||null, end:x.end||null}))};
 }
 function wSnap(){
@@ -337,7 +339,7 @@ function coachLog(){
     if(extra.length) L.push(extra.join(' · '));
     (s.exercises||[]).forEach(e=>{
       const w=(e.warm&&e.warm.length)? ` (warm-up ${e.warm.map(x=>setLabel(e,x)).join(', ')})` : '';
-      L.push(`- ${e.name} [${e.muscle||''}, ${e.kind}, target ${e.target||'?'}]: ${e.skipped||!e.sets.length? 'skipped' : e.sets.map(x=>setLabel(e,x)).join(', ')}${w}${e.start&&e.end?` · ${fmtDur(e.end-e.start)}`:''}${e.info?` · info: ${e.info}`:''}`);
+      L.push(`- ${e.name}${e.replaces?` (instead of ${e.replaces})`:''} [${e.muscle||''}, ${e.kind}, target ${e.target||'?'}]: ${e.skipped||!e.sets.length? 'skipped' : e.sets.map(x=>setLabel(e,x)).join(', ')}${w}${e.start&&e.end?` · ${fmtDur(e.end-e.start)}`:''}${e.info?` · info: ${e.info}`:''}`);
     });
     if(s.health) L.push(`Health: ${kv(s.health)}`);
     if(s.notes) L.push(`Notes: ${s.notes}`);
@@ -1082,6 +1084,8 @@ function liveRestIdx(e){
   const last=done.reduce((p,q)=>p.end>q.end?p:q), li=e.sets.indexOf(last);
   return e.sets.slice(li+1).some(x=>setState(x)==='todo')? li : -1;
 }
+// rest after set x: after a warm-up set always settings.warmRest, after a working set the exercise's rest
+const restAfter = (e, x) => x && x.warm? (S.settings.warmRest ?? 60) : (e.rest||0);
 function stopRunning(e, ts){ e.sets.forEach(x=>{ if(setState(x)==='run'){ x.end=Math.max(x.start+1000, ts); x.done=true; } }); }
 function leaveExercise(ts, skipped){
   const a=A(), e=curEx(); if(!e) return;
@@ -1111,7 +1115,7 @@ function checkSet(si){
   if(!isCur) return;
   x.end=ts; x.done=true;
   if(!x.start){ const prev=e.sets.filter(y=>y.end && y!==x).sort((p,q)=>q.end-p.end)[0];
-    x.start=Math.min(prev? prev.end+e.rest*1000 : (e.arrived||ts), ts-1000); x.est=true; }
+    x.start=Math.min(prev? prev.end+restAfter(e,prev)*1000 : (e.arrived||ts), ts-1000); x.est=true; }
   e.sets.forEach(y=>{ if(y!==x && setState(y)==='run'){ y.end=Math.max(y.start+1000, x.start); y.done=true; } });
   woFocus=null;
   if(!a.moving && !e.sets.some(y=>setState(y)==='todo')) leaveExercise(ts, false);
@@ -1182,13 +1186,14 @@ function gearSave(toTpl){
   const warm=e.sets.filter(x=>x.warm), work=e.sets.filter(x=>!x.warm);
   const fit=(arr, n, isWarm)=>{ arr=arr.slice(0,n); while(arr.length<n){ const l=arr[arr.length-1] || (isWarm? {w:e.kind==='w'? warmWeight((work[0]||{}).w) : hasWeight(e)? num((work[0]||{}).w) : '', r:(work[0]||{}).r} : work[work.length-1]) || {w:'', r:parseInt(target)||''};
     arr.push(newSet(l.w, l.r, isWarm)); } return arr; };
-  const oldTpl=e.tplName;
+  const oldTpl=e.tplName, oldName=e.name, rep=e.replaces;
   Object.assign(e, {name, info, target, rest, sets:[...fit(warm,nw,true), ...fit(work,ns,false)]});
+  if(rep){ const al=(S.alts[rep]||[]).find(x=>x.name===oldName); if(al) Object.assign(al, {name, info}); } // name and info belong to the alternative
   if(toTpl){
-    tplChange(a.key, `Changed “${name}”`, tp=>{ const te=tp.exercises.find(x=>x.name===oldTpl);
-      const fields={name, info, target, rest, warm:nw, sets:ns};
-      if(te) Object.assign(te, fields); else tp.exercises.push(Object.assign({kind:e.kind, muscle:e.muscle}, fields)); });
-    e.tplName=name;
+    tplChange(a.key, `Changed “${rep||name}”`, tp=>{ const te=tp.exercises.find(x=>x.name===oldTpl);
+      const fields = rep? {target, rest, warm:nw, sets:ns} : {name, info, target, rest, warm:nw, sets:ns};
+      if(te) Object.assign(te, fields); else if(!rep) tp.exercises.push(Object.assign({kind:e.kind, muscle:e.muscle}, fields)); });
+    if(!rep) e.tplName=name;
     toast(tplPendingNote());
   } else toast('Changed for this workout only');
 }
@@ -1239,11 +1244,12 @@ function setRow(e, x, si, label, live, isNext){
     <div class="n">${label}</div><div class="val">${setVal(e,x)}</div><div class="btns">${btns}</div>${open?setEditor(e,x,si):''}</div></li>`;
 }
 function restRow(e, a, b, live){
-  if(live) return `<li class="rst on"><div class="rest live" data-rest="${a.end}" data-len="${e.rest}"><div class="rbar"></div><span class="t">${fmtClock(e.rest*1000)}</span><span class="lb">rest left</span><span class="h">ends when you tap Start</span></div></li>`;
+  const len=restAfter(e, a);
+  if(live) return `<li class="rst on"><div class="rest live" data-rest="${a.end}" data-len="${len}"><div class="rbar"></div><span class="t">${fmtClock(len*1000)}</span><span class="lb">rest left</span><span class="h">ends when you tap Start</span></div></li>`;
   if(b.start) return `<li class="rst"><div class="rest">Rest <b>${b.pressed?'':'~'}${fmtClock(b.start-a.end)}</b></div></li>`;
   return '';
 }
-function exSummary(e){ const w=e.sets.filter(x=>!x.warm), t=w[0]; return `${w.length} × ${esc(e.target)}${hasWeight(e)&&t?' · '+fw(t.w)+' kg':''} · rest ${e.rest} s`; }
+function exSummary(e){ const w=e.sets.filter(x=>!x.warm), t=w[0]; return `${w.length} × ${esc(e.target)}${hasWeight(e)&&t?' · '+fw(t.w)+' kg':''} · rest ${e.rest} s${e.replaces?` · instead of ${esc(e.replaces)}`:''}`; }
 // Progression: last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12) → suggest more weight.
 const topReps = target => { const m=String(target||'').match(/\d+/g); return m? Math.max(...m.map(Number)) : 0; };
 function progressHint(e){
@@ -1264,7 +1270,7 @@ function exScreen(){
   const stat = e.skipped? ' · skipped' : past? ` · ${e.sets.filter(x=>x.done&&!x.warm).length}/${e.sets.filter(x=>!x.warm).length} sets${e.left?' · '+fmtClock(e.left-e.arrived):''}` : '';
   const rows=[];
   rows.push(`<li class="exh ${live?'cur':past?(e.skipped?'skp':'past'):'upc'}"><div class="eyebrow">${live?'':past?'Earlier · ':i===nIdx?'Up next · ':'Later · '}Exercise ${i+1} of ${n} · ${esc(e.muscle)}${stat}</div>
-    <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
+    <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped && !e.sets.some(x=>x.start||x.end)? '<button class="icon" data-act="exRepOpen" aria-label="Replace with an alternative">⇄</button>' : ''}${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
     ${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
     <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
   // also on the exercise you are walking to, so you can set the weight before you start
@@ -1414,8 +1420,8 @@ function tick(){
   });
   // beep once when the running rest of the current exercise is over
   const e=curEx();
-  if(e && a.stage==='steps' && !a.moving){ const li=liveRestIdx(e); if(li>=0){ const at=e.sets[li].end+e.rest*1000; if(e.rest>0 && Date.now()>=at && a.restBeep!==at){ a.restBeep=at; save(false); beep(); }
-    else if(e.rest>=20 && Date.now()>=at-10000 && Date.now()<at && a.restWarn!==at){ a.restWarn=at; save(false); beep(1); } } }
+  if(e && a.stage==='steps' && !a.moving){ const li=liveRestIdx(e); if(li>=0){ const rl=restAfter(e, e.sets[li]), at=e.sets[li].end+rl*1000; if(rl>0 && Date.now()>=at && a.restBeep!==at){ a.restBeep=at; save(false); beep(); }
+    else if(rl>=20 && Date.now()>=at-10000 && Date.now()<at && a.restWarn!==at){ a.restWarn=at; save(false); beep(1); } } }
   const el=$('#elapsed'); if(el) el.textContent=fmtClock((a.end||Date.now())-a.start);
   const sc=$('#stepClock'); if(sc){ const st = a.stage==='stretching'? a.stretch.start : a.warmup.start; sc.textContent=fmtClock(Date.now()-st); }
 }
@@ -1535,6 +1541,7 @@ function agoSheet(kind){
 function exGearSheet(){
   const a=A(), e=viewEx(), ws=e.sets.filter(x=>x.warm).length, ns=e.sets.length-ws, v=S.templates[a.key].v||1;
   return `<h2>⚙ ${esc(e.name)}</h2><p class="small ink2" style="margin-top:0">kg and reps are changed directly on the sets.</p>
+  ${e.replaces? `<p class="small" style="color:var(--accent);margin:0 0 6px">⇄ Instead of <b>${esc(e.replaces)}</b>. Name and info are saved to this alternative; sets, target and rest go to “${esc(e.replaces)}” in the template.</p>` : ''}
   <label class="f">Name (write “single handedly” here if it's one arm or leg)</label><input id="gName" value="${esc(e.name)}">
   <label class="f">Info under the name (new lines allowed)</label><textarea class="auto" rows="1" id="gInfo" placeholder="e.g. Setting 7 · elbows down">${esc(e.info)}</textarea>
   <div class="grid2"><div><label class="f">Warm-up sets</label><input id="gWarm" inputmode="numeric" value="${ws}"></div><div><label class="f">Working sets</label><input id="gSets" inputmode="numeric" value="${ns}"></div>
@@ -1542,6 +1549,43 @@ function exGearSheet(){
   <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b>: today's workout uses it right away. ${esc(keyLabel(a.key))} v${v+1} is saved once when the workout ends (all changes of this workout together); v${v} stays in Settings.</span></div>
   <div class="grid2" style="margin-top:10px"><button class="big" data-act="gearSave" data-v="once">This workout only</button><button class="primary big" data-act="gearSave" data-v="tpl">Also update template</button></div>
   <button class="link" style="color:var(--bad);margin-top:6px" data-act="gearRemove">Remove from template…</button>
+  <button class="big" style="margin-top:8px;background:transparent" data-act="closeModal">Cancel</button>`;
+}
+/* Replace: swap the exercise on screen for an alternative, for this workout only (the template stays).
+   Alternatives are remembered per template exercise in S.alts[tplName]; each keeps its own history (linked by name).
+   Sets, target, rest and warm-up count stay; kg and reps come from the last time you did the alternative. */
+const altKey = e => e.replaces || e.tplName || e.name;
+function exReplace(def, toTpl){
+  const a=A(), i=a.view, e=a.exercises[i], orig=altKey(e);
+  const origDef = e.replaces? e.origDef : {name:e.name, info:e.info, kind:e.kind, muscle:e.muscle};
+  const back = def.name===orig, ws=e.sets.filter(x=>x.warm).length;
+  const n=buildExercise({name:def.name, info:def.info||'', kind:def.kind||e.kind, muscle:def.muscle||e.muscle, target:e.target, rest:e.rest, sets:e.sets.length-ws, warm:ws});
+  Object.assign(n, {tplName:e.tplName, arrived:e.arrived});
+  if(!back){ n.replaces=orig; n.origDef=origDef;
+    const L=S.alts[orig]=(S.alts[orig]||[]).filter(x=>x.name!==def.name);
+    L.unshift({name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); }
+  if(toTpl && !back){ // the alternative becomes the template exercise; the old one stays as its alternative
+    tplChange(a.key, `Replaced “${orig}” with “${def.name}”`, tp=>{ const te=tp.exercises.find(x=>x.name===e.tplName);
+      if(te) Object.assign(te, {name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); });
+    const L=(S.alts[orig]||[]).filter(x=>x.name!==def.name); L.unshift(origDef); delete S.alts[orig]; S.alts[def.name]=L;
+    n.tplName=def.name; delete n.replaces; delete n.origDef;
+    a.exercises[i]=n; woFocus=null; toast(`${def.name} replaces ${orig} in the template. ${tplPendingNote()}`); return;
+  }
+  a.exercises[i]=n; woFocus=null;
+  toast(back? `Back to ${orig}` : `${def.name} instead of ${orig} · this workout only`);
+}
+function exRepSheet(){
+  const e=viewEx(), orig=altKey(e), L=S.alts[orig]||[];
+  const row=(x, act, i, del)=>`<div class="list-item"><div style="flex:1;min-width:0">${esc(x.name)}<div class="small muted">${esc(x.info||KINDS[x.kind]||'')}</div></div>${del? `<button class="icon" data-act="exRepDel" data-i="${i}" aria-label="Forget this alternative">×</button><button class="icon" data-act="exRepPick" data-v="tpl" data-i="${i}" aria-label="Use it and put it in the template">📌</button>` : ''}<button class="primary" style="padding:6px 10px" data-act="${act}" data-i="${i}">Use</button></div>`;
+  const items=[e.replaces? row(e.origDef||{name:orig}, 'exRepBack', -1, false) : '', ...L.map((x,i)=>x.name===e.name? '' : row(x, 'exRepPick', i, true))].join('');
+  return `<h2>⇄ Replace ${esc(orig)}</h2><p class="small ink2" style="margin-top:0">Machine different or taken? Do another exercise in its place, <b>this workout only</b>. The template and the order stay. Sets, target and rest stay; kg and reps come from the last time you did the alternative. It is remembered as an alternative for next time. 📌 or “Also in template” puts it into the template instead (the old one becomes its alternative).</p>
+  ${items || '<p class="small muted">No alternatives yet.</p>'}
+  <h3 style="margin:14px 0 4px">New alternative</h3>
+  <label class="f">Name</label><input id="rName" placeholder="e.g. Leg Press 45° (other machine)">
+  <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" id="rInfo" placeholder="e.g. Seat 5 · feet high"></textarea>
+  <div class="grid2"><div><label class="f">Type</label><select id="rKind">${Object.entries(KINDS).map(([k,l])=>`<option value="${k}" ${k===e.kind?'selected':''}>${l}</option>`).join('')}</select></div>
+  <div><label class="f">Muscle</label><select id="rMuscle">${MUSCLES.map(m=>`<option ${m===e.muscle?'selected':''}>${m}</option>`).join('')}</select></div></div>
+  <div class="grid2" style="margin-top:12px"><button class="big" data-act="exRepNew" data-v="once">This workout only</button><button class="primary big" data-act="exRepNew" data-v="tpl">Also in template</button></div>
   <button class="big" style="margin-top:8px;background:transparent" data-act="closeModal">Cancel</button>`;
 }
 function exMoveSheet(){
@@ -2114,6 +2158,9 @@ function viewSettings(){
     <p class="small muted">A “Save” button appears in the workout; it runs your Gym Save shortcut.</p>
     <label class="f">Default rest for new exercises</label>
     <div class="chips">${[45,60,90,120].map(s=>`<button class="chip ${st.defaultRest===s?'on':''}" data-act="defRest" data-v="${s}">${s} s</button>`).join('')}</div>
+    <label class="f">Rest after a warm-up set (every exercise)</label>
+    <div class="chips">${[30,45,60,90,120].map(s=>`<button class="chip ${(st.warmRest??60)===s?'on':''}" data-act="warmRest" data-v="${s}">${s} s</button>`).join('')}</div>
+    <p class="small muted">After working sets the exercise's own rest counts.</p>
   </div>
   <div class="card"><h2>iCloud Drive backup</h2>
     <p class="small ink2">Saves <b>data.json</b> (all workouts, skips, bodyweight, templates, settings and your name) to <b>iCloud Drive/Gym</b>. Last sync: <b>${st.icloudLast? new Date(st.icloudLast).toLocaleString('de-CH',{dateStyle:'short',timeStyle:'short'}) : 'never'}</b>${icloudDirty()?' · <span style="color:var(--warn)">unsaved changes</span>':''}</p>
@@ -2197,7 +2244,8 @@ const MANUAL = [
     {id:'prog', title:'Go heavier (progression hint)', where:'Workout → under the exercise name', text:'If last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12), a green hint suggests more weight. Tap it to put +1 kg (changeable in Settings → General) on all working sets.'},
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
     {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
-    {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙.'},
+    {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙. After a warm-up set the rest is always the same for every exercise (default 60 s, Settings → Workout in progress).'},
+    {id:'replace', title:'Replace with an alternative', where:'Workout → ⇄ next to the name (before the first set)', text:'Do another exercise in place of the planned one, e.g. a different leg press machine. Only for this workout: the template and the order stay. Pick a saved alternative or create a new one (name, info, type, muscle). Sets, target and rest stay; kg and reps come from the last time you did that alternative, it has its own history. Alternatives are remembered per exercise, last used first; × forgets one. ⇄ again brings the original back. “Also in template” (or 📌 on a saved one) puts the alternative into the template instead (one new version at the end of the workout); the old exercise then becomes its alternative.'},
     {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". After the last exercise it goes straight to the stretching question. At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
     {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info under the name (several lines possible), warm-up sets, working sets, target and rest. "This workout only" or "Also update template": today\'s workout uses the change right away, and all template changes of one workout become ONE new version when the workout ends. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
     {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: only until the first set has started, then the bar shows just Move on (done sets count).'},
@@ -2368,6 +2416,13 @@ document.addEventListener('click', ev=>{
     case 'gearRemove': { const e=viewEx(); if(confirm(`Remove “${e.tplName}” from the ${keyLabel(W.key)} template? This saves a new version; the old one stays in Settings. It stays in today's workout.`)){
       tplChange(W.key, `Removed “${e.tplName}”`, tp=>{ tp.exercises=tp.exercises.filter(x=>x.name!==e.tplName); }); save(); closeModal(); render(); toast(tplPendingNote()); } break; }
     case 'exMoveOpen': openModal(exMoveSheet()); break;
+    case 'exRepOpen': openModal(exRepSheet()); break;
+    case 'exRepPick': { const x=(S.alts[altKey(viewEx())]||[])[+t.dataset.i]; if(x){ exReplace(x, v==='tpl'); save(); closeModal(); render(); } break; }
+    case 'exRepBack': { const e=viewEx(); exReplace(e.origDef||{name:e.replaces}); save(); closeModal(); render(); break; }
+    case 'exRepDel': { const k=altKey(viewEx()), L=S.alts[k]||[], x=L[+t.dataset.i]; if(x && confirm(`Forget “${x.name}” as an alternative? Its history stays.`)){ L.splice(+t.dataset.i,1); save(); openModal(exRepSheet()); } break; }
+    case 'exRepNew': { const name=$('#rName').value.trim(); if(!name){ toast('Enter a name'); break; }
+      if(name===viewEx().name){ toast('That is the exercise you have now'); break; }
+      exReplace({name, info:$('#rInfo').value.trim(), kind:$('#rKind').value, muscle:$('#rMuscle').value}, v==='tpl'); save(); closeModal(); render(); break; }
     case 'exUp': case 'exDown': { const i=+t.dataset.i, j=a==='exUp'? i-1 : i+1, L=W.exercises;
       if(j>W.idx && j<L.length && !L[j].arrived){ [L[i],L[j]]=[L[j],L[i]]; save(); openModal(exMoveSheet()); render(); } break; }
     case 'exDoNext': exDoNext(+t.dataset.i); save(); closeModal(); woScroll='top'; render(); break;
@@ -2442,6 +2497,7 @@ document.addEventListener('click', ev=>{
       tplChange(tplEdit, `Back to v${h.v}`, tp=>{ const c=JSON.parse(JSON.stringify(h.tpl)); tp.warmup=c.warmup; tp.exercises=c.exercises; }); save(); render(); toast(`${keyLabel(tplEdit)} v${S.templates[tplEdit].v} is in use now`); } break; }
     case 'tplPaste': tplPaste(); break;
     case 'defRest': S.settings.defaultRest=+v; save(); render(); break;
+    case 'warmRest': S.settings.warmRest=+v; save(); render(); break;
     case 'wipSave': S.settings.wipSave=+v; save(); render(); break;
     case 'export': exportData(); break;
     case 'icloudSave': closeModal(); saveToICloud(); break;

@@ -57,6 +57,8 @@ const heavy = ex => { if(!ex || !ex.up) return ''; const w=(ex.sets||[]).filter(
 const STRETCH_Q = 'Next = yes, stretch (no: tap No in the app)';
 const NOTHING = 'Next = nothing here' + D + 'open the app';
 const msg = (t, line, next) => ({title:t, body:`${line}\n${next}`});
+// rest after set x: warm-up sets use the app's warm-up rest (wrest), working sets the exercise rest
+const restAfter = (snap, x) => x && x.warm && snap.wrest!=null ? snap.wrest : (snap.rest||0);
 export function view(snap, now){
   if(!snap || !snap.mode || snap.mode==='none') return {phase:'none'};
   const q=(snap.queue||[])[0]||null;
@@ -66,7 +68,7 @@ export function view(snap, now){
   const base={name:snap.name, rest:snap.rest||0, next:q};
   if(run>=0) return {...base, phase:'run', i:run, label:setLabel(sets,run), set:sets[run], since:sets[run].start};
   if(todo<0) return {...base, phase:'done'};
-  if(last) return {...base, phase:'rest', i:todo, label:setLabel(sets,todo), set:sets[todo], since:last.end, restEnd:last.end+(snap.rest||0)*1000};
+  if(last) return {...base, rest:restAfter(snap,last), phase:'rest', i:todo, label:setLabel(sets,todo), set:sets[todo], since:last.end, restEnd:last.end+restAfter(snap,last)*1000};
   return {...base, phase:'todo', i:todo, label:setLabel(sets,todo), set:sets[todo]};
 }
 const firstSet = q => { const i=firstTodo(q.sets); return i<0? '' : `${D}${setLabel(q.sets,i)}${D}${setTxt(q.sets[i])}`; };
@@ -100,7 +102,7 @@ export function applyOp(snap, op){
     case 'warmupDone': if(m!=='warmup') return false; snap.mode= q.length? 'moving' : 'stretch'; snap.since=op.ts; return true;
     case 'arrive': {
       if(m!=='moving' || !q[0] || q[0].exIdx!==op.exIdx) return false;
-      const e=q.shift(); Object.assign(snap, {mode:'ex', exIdx:e.exIdx, name:e.name, rest:e.rest, up:e.up||null, sets:e.sets}); return true; }
+      const e=q.shift(); Object.assign(snap, {mode:'ex', exIdx:e.exIdx, name:e.name, rest:e.rest, wrest:e.wrest, up:e.up||null, sets:e.sets}); return true; }
     case 'finish': if(m!=='moving' || q.length) return false; snap.mode='stretch'; snap.since=op.ts; return true;
     case 'stretchYes': if(m!=='stretch') return false; snap.mode='stretchMove'; snap.since=op.ts; return true;
     case 'stretchStart': if(m!=='stretchMove') return false; snap.mode='stretching'; snap.since=op.ts; return true;
@@ -145,7 +147,7 @@ export function nextStep(snap, now){
       const head=`${v.label} done (${clock(now-v.since)})`;
       if(w.phase==='moving') return {op, ...msg(title(v.name), `${head}${D}all sets done${D}next exercise: ${w.next.name}${firstSet(w.next)}${heavy(w.next)}`, "Next = I'm at the machine")};
       if(w.phase==='stretch') return {op, ...msg(title(v.name), `${head}${D}workout done`, STRETCH_Q)};
-      return {op, ...msg(title(v.name), `${head}${D}rest ${clock(snap.rest*1000)}${D}then ${w.label}${D}${setTxt(w.set)}`, `Next = start ${w.label}`)}; }
+      return {op, ...msg(title(v.name), `${head}${D}rest ${clock(restAfter(snap,v.set)*1000)}${D}then ${w.label}${D}${setTxt(w.set)}`, `Next = start ${w.label}`)}; }
   }
   return {op, ...status(snap, now)};
 }
