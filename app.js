@@ -1270,7 +1270,7 @@ function exScreen(){
   const stat = e.skipped? ' · skipped' : past? ` · ${e.sets.filter(x=>x.done&&!x.warm).length}/${e.sets.filter(x=>!x.warm).length} sets${e.left?' · '+fmtClock(e.left-e.arrived):''}` : '';
   const rows=[];
   rows.push(`<li class="exh ${live?'cur':past?(e.skipped?'skp':'past'):'upc'}"><div class="eyebrow">${live?'':past?'Earlier · ':i===nIdx?'Up next · ':'Later · '}Exercise ${i+1} of ${n} · ${esc(e.muscle)}${stat}</div>
-    <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${!past && !e.skipped && !e.sets.some(x=>x.start||x.end)? '<button class="icon" data-act="exRepOpen" aria-label="Replace with an alternative">⇄</button>' : ''}${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
+    <div class="titlerow"><div class="exname">${esc(e.name)}</div><div class="tbtns">${canReplace(i)? '<button class="icon" data-act="exRepOpen" aria-label="Replace with an alternative">⇄</button>' : ''}${!past && !e.skipped? '<button class="icon" data-act="exMoveOpen" aria-label="Move exercises">⇅</button>' : ''}<button class="icon" data-act="exGear" aria-label="Exercise settings">⚙</button></div></div>
     ${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
     <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
   // also on the exercise you are walking to, so you can set the weight before you start
@@ -1548,6 +1548,7 @@ function exGearSheet(){
   <div><label class="f">Target (reps)</label><input id="gTarget" value="${esc(e.target)}"></div><div><label class="f">Rest (s)</label><input id="gRest" inputmode="numeric" value="${e.rest}"></div></div>
   <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b>: today's workout uses it right away. ${esc(keyLabel(a.key))} v${v+1} is saved once when the workout ends (all changes of this workout together); v${v} stays in Settings.</span></div>
   <div class="grid2" style="margin-top:10px"><button class="big" data-act="gearSave" data-v="once">This workout only</button><button class="primary big" data-act="gearSave" data-v="tpl">Also update template</button></div>
+  ${canReplace(a.view)? '<button class="big" style="margin-top:10px" data-act="exRepOpen">⇄ Replace with an alternative…</button>' : ''}
   <button class="link" style="color:var(--bad);margin-top:6px" data-act="gearRemove">Remove from template…</button>
   <button class="big" style="margin-top:8px;background:transparent" data-act="closeModal">Cancel</button>`;
 }
@@ -1555,12 +1556,20 @@ function exGearSheet(){
    Alternatives are remembered per template exercise in S.alts[tplName]; each keeps its own history (linked by name).
    Sets, target, rest and warm-up count stay; kg and reps come from the last time you did the alternative. */
 const altKey = e => e.replaces || e.tplName || e.name;
+// the exercise you are at (also mid-exercise: done sets stay, see exReplace) or one still to come
+function canReplace(i){ const a=A(), e=a.exercises[i]; if(!e || e.skipped) return false;
+  return i===a.idx? !a.moving : !e.arrived && !e.sets.some(x=>x.start||x.end); }
 function exReplace(def, toTpl){
   const a=A(), i=a.view, e=a.exercises[i], orig=altKey(e);
   const origDef = e.replaces? e.origDef : {name:e.name, info:e.info, kind:e.kind, muscle:e.muscle};
-  const back = def.name===orig, ws=e.sets.filter(x=>x.warm).length;
-  const n=buildExercise({name:def.name, info:def.info||'', kind:def.kind||e.kind, muscle:def.muscle||e.muscle, target:e.target, rest:e.rest, sets:e.sets.length-ws, warm:ws});
-  Object.assign(n, {tplName:e.tplName, arrived:e.arrived});
+  // sets already done here: the done part stays as its own finished entry, the alternative takes over the sets still to do
+  const split = e.sets.some(x=>x.start||x.end), ts=Date.now();
+  if(split) stopRunning(e, ts);
+  const todo = split? e.sets.filter(x=>!x.end) : e.sets, ws=todo.filter(x=>x.warm).length;
+  const back = def.name===orig;
+  const n=buildExercise({name:def.name, info:def.info||'', kind:def.kind||e.kind, muscle:def.muscle||e.muscle, target:e.target, rest:e.rest, sets:Math.max(1, todo.length-ws), warm:ws});
+  Object.assign(n, {tplName:e.tplName, arrived: split? ts : e.arrived});
+  const place = () => { if(split){ e.sets=e.sets.filter(x=>x.end); e.left=ts; a.exercises.splice(i+1, 0, n); a.idx=a.view=i+1; } else a.exercises[i]=n; woFocus=null; };
   if(!back){ n.replaces=orig; n.origDef=origDef;
     const L=S.alts[orig]=(S.alts[orig]||[]).filter(x=>x.name!==def.name);
     L.unshift({name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); }
@@ -1569,16 +1578,17 @@ function exReplace(def, toTpl){
       if(te) Object.assign(te, {name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); });
     const L=(S.alts[orig]||[]).filter(x=>x.name!==def.name); L.unshift(origDef); delete S.alts[orig]; S.alts[def.name]=L;
     n.tplName=def.name; delete n.replaces; delete n.origDef;
-    a.exercises[i]=n; woFocus=null; toast(`${def.name} replaces ${orig} in the template. ${tplPendingNote()}`); return;
+    place(); toast(`${def.name} replaces ${orig} in the template. ${tplPendingNote()}`); return;
   }
-  a.exercises[i]=n; woFocus=null;
-  toast(back? `Back to ${orig}` : `${def.name} instead of ${orig} · this workout only`);
+  place();
+  toast(split? `Done sets stay with ${e.name}. The rest: ${def.name}` : back? `Back to ${orig}` : `${def.name} instead of ${orig} · this workout only`);
 }
 function exRepSheet(){
   const e=viewEx(), orig=altKey(e), L=S.alts[orig]||[];
   const row=(x, act, i, del)=>`<div class="list-item"><div style="flex:1;min-width:0">${esc(x.name)}<div class="small muted">${esc(x.info||KINDS[x.kind]||'')}</div></div>${del? `<button class="icon" data-act="exRepDel" data-i="${i}" aria-label="Forget this alternative">×</button><button class="icon" data-act="exRepPick" data-v="tpl" data-i="${i}" aria-label="Use it and put it in the template">📌</button>` : ''}<button class="primary" style="padding:6px 10px" data-act="${act}" data-i="${i}">Use</button></div>`;
   const items=[e.replaces? row(e.origDef||{name:orig}, 'exRepBack', -1, false) : '', ...L.map((x,i)=>x.name===e.name? '' : row(x, 'exRepPick', i, true))].join('');
   return `<h2>⇄ Replace ${esc(orig)}</h2><p class="small ink2" style="margin-top:0">Machine different or taken? Do another exercise in its place, <b>this workout only</b>. The template and the order stay. Sets, target and rest stay; kg and reps come from the last time you did the alternative. It is remembered as an alternative for next time. 📌 or “Also in template” puts it into the template instead (the old one becomes its alternative).</p>
+  ${e.sets.some(x=>x.end)? `<p class="small" style="color:var(--accent);margin-top:0">You already did ${e.sets.filter(x=>x.end).length} set(s): they stay with ${esc(e.name)}, the alternative gets the ${e.sets.filter(x=>!x.end).length} set(s) still to do.</p>` : ''}
   ${items || '<p class="small muted">No alternatives yet.</p>'}
   <h3 style="margin:14px 0 4px">New alternative</h3>
   <label class="f">Name</label><input id="rName" placeholder="e.g. Leg Press 45° (other machine)">
@@ -2245,7 +2255,7 @@ const MANUAL = [
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
     {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙. After a warm-up set the rest is always the same for every exercise (default 60 s, Settings → Workout in progress).'},
-    {id:'replace', title:'Replace with an alternative', where:'Workout → ⇄ next to the name (before the first set)', text:'Do another exercise in place of the planned one, e.g. a different leg press machine. Only for this workout: the template and the order stay. Pick a saved alternative or create a new one (name, info, type, muscle). Sets, target and rest stay; kg and reps come from the last time you did that alternative, it has its own history. Alternatives are remembered per exercise, last used first; × forgets one. ⇄ again brings the original back. “Also in template” (or 📌 on a saved one) puts the alternative into the template instead (one new version at the end of the workout); the old exercise then becomes its alternative.'},
+    {id:'replace', title:'Replace with an alternative', where:'Workout → ⇄ next to the name · ⚙ → Replace', text:'Do another exercise in place of the planned one, e.g. a different leg press machine. Only for this workout: the template and the order stay. Pick a saved alternative or create a new one (name, info, type, muscle). Sets, target and rest stay; kg and reps come from the last time you did that alternative, it has its own history. Alternatives are remembered per exercise, last used first; × forgets one. Also mid-exercise: the sets you already did stay with the original (as its own entry), the alternative gets the sets still to do. ⇄ again brings the original back. “Also in template” (or 📌 on a saved one) puts the alternative into the template instead (one new version at the end of the workout); the old exercise then becomes its alternative.'},
     {id:'moving', title:'Moving to the next exercise', where:'Workout → after the last set', text:'✓ on the last set (or Skip / Move on) starts "Moving to the next exercise". After the last exercise it goes straight to the stretching question. At the next machine tap "I\'m at the machine": that is when the exercise starts. The time until the first set is setting up. If you press nothing at all on an exercise, all its sets count and the time is split evenly.'},
     {id:'gear', title:'⚙ Change an exercise / the template', where:'Workout → ⚙ next to the exercise name', text:'Name, info under the name (several lines possible), warm-up sets, working sets, target and rest. "This workout only" or "Also update template": today\'s workout uses the change right away, and all template changes of one workout become ONE new version when the workout ends. "Remove from template" works the same way. Write "single handedly" into the name for one-arm or one-leg exercises.'},
     {id:'mas', title:'Move · Add · Skip', where:'Workout → ⇅ next to the name · ＋ top right · Skip in the bottom bar', text:'Move: machine taken? Pick another exercise to do next (or right away if you haven\'t started). Add: a new exercise after the current one, for today only or also in the template. Skip: only until the first set has started, then the bar shows just Move on (done sets count).'},
