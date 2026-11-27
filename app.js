@@ -188,8 +188,8 @@ function wApi(path, body){
 function wEx(e, i){
   const u = e.kind==='time'? ' s' : e.kind==='dur'? ' min' : '';
   const ph = progressHint(e); // recommended heavier weight, shown in the notifications too
-  return {exIdx:i, name:e.name, rest:e.rest||0, wrest:S.settings.warmRest ?? 60, up: ph? ph.to : null,
-    sets:e.sets.map(x=>({w:hasWeight(e)? num(x.w) : 0, r:String(x.r??''), u, warm:!!x.warm, start:x.start||null, end:x.end||null}))};
+  return {exIdx:i, name:e.name, rest:e.rest||0, wrest:S.settings.warmRest ?? 60, up: ph? (isAssist(e)? -ph.to : ph.to) : null,
+    sets:e.sets.map(x=>({w:hasWeight(e)? (isAssist(e)? -num(x.w) : num(x.w)) : 0, r:String(x.r??''), u, warm:!!x.warm, start:x.start||null, end:x.end||null}))};
 }
 function wSnap(){
   const a=S.active;
@@ -339,7 +339,7 @@ function coachLog(){
     if(extra.length) L.push(extra.join(' · '));
     (s.exercises||[]).forEach(e=>{
       const w=(e.warm&&e.warm.length)? ` (warm-up ${e.warm.map(x=>setLabel(e,x)).join(', ')})` : '';
-      L.push(`- ${e.name}${e.replaces?` (instead of ${e.replaces})`:''} [${e.muscle||''}, ${e.kind}, target ${e.target||'?'}]: ${e.skipped||!e.sets.length? 'skipped' : e.sets.map(x=>setLabel(e,x)).join(', ')}${w}${e.start&&e.end?` · ${fmtDur(e.end-e.start)}`:''}${e.info?` · info: ${e.info}`:''}`);
+      L.push(`- ${e.name}${e.replaces?` (instead of ${e.replaces})`:''} [${e.muscle||''}, ${e.kind}${isAssist(e)?', assisted: kg = support, −40×8 means 40 kg support':''}, target ${e.target||'?'}]: ${e.skipped||!e.sets.length? 'skipped' : e.sets.map(x=>setLabel(e,x)).join(', ')}${w}${e.start&&e.end?` · ${fmtDur(e.end-e.start)}`:''}${e.info?` · info: ${e.info}`:''}`);
     });
     if(s.health) L.push(`Health: ${kv(s.health)}`);
     if(s.notes) L.push(`Notes: ${s.notes}`);
@@ -565,7 +565,7 @@ async function tplPaste(){
     if(!Array.isArray(list) || !list.length || !list.every(e=>e && e.name)) throw new Error('no "exercises" list with names found');
     const exs = list.map(e=>({ name:String(e.name).trim(), info:String(e.info||''), kind: KINDS[e.kind]? e.kind : 'w',
       sets:Math.max(1, parseInt(e.sets)||3), target:String(e.target||'8-12'), rest: e.rest!=null && e.rest!==''? Math.max(0, parseInt(e.rest)||0) : S.settings.defaultRest,
-      muscle: MUSCLES.includes(e.muscle)? e.muscle : defaultMuscle(e.name), warm: e.warm!=null && e.warm!==''? Math.max(0, parseInt(e.warm)||0) : (KINDS[e.kind]&&e.kind!=='w'? 0 : 1), w: num(e.w)||0 }));
+      muscle: MUSCLES.includes(e.muscle)? e.muscle : defaultMuscle(e.name), warm: e.warm!=null && e.warm!==''? Math.max(0, parseInt(e.warm)||0) : (KINDS[e.kind]&&e.kind!=='w'? 0 : 1), w: num(e.w)||0, ...(e.assist? {assist:true} : {}) }));
     const cur = S.templates[tplEdit];
     if(!confirm(`Make this the new ${keyLabel(tplEdit)} template (${exs.length} exercises)? v${cur.v||1} stays in the version list.`)) return;
     tplChange(tplEdit, 'Pasted', t=>{ t.exercises=exs; if(d.warmup && d.warmup.text!=null) t.warmup={text:String(d.warmup.text), minutes:parseInt(d.warmup.minutes)||0}; });
@@ -667,27 +667,38 @@ const fmtNum = n => n>=10000? (n/1000).toFixed(1)+'k' : n>=100? Math.round(n).to
 const fw = n => String(Math.round(num(n)*100)/100);
 const sortSessions = arr => arr.slice().sort((a,b)=> a.date===b.date ? (a.start||0)-(b.start||0) : a.date<b.date?-1:1);
 const hasWeight = e => e.kind==='w' || e.kind==='bw';
-const unitOf = e => e.kind==='time'?'s':e.kind==='dur'?'min':e.kind==='reps'?'reps':'kg';
+// Assisted ("negative") exercise: the kg entered is SUPPORT (e.g. assisted pull-up machine). Load = bodyweight − support, less support = stronger.
+const isAssist = e => !!(e && e.assist) && hasWeight(e);
+const unitOf = e => e.kind==='time'?'s':e.kind==='dur'?'min':e.kind==='reps'?'reps':isAssist(e)?'kg support':'kg';
+const effW = (e, w, date) => isAssist(e)? Math.max(0, latestBW(date) - num(w)) : num(w);
+// warm-up set: for assisted exercises MORE support (halfway to full bodyweight support), otherwise warmWeight()
+function warmFor(e, w){
+  if(!isAssist(e)) return warmWeight(w);
+  w=num(w); const bw=latestBW(); if(!(bw>w)) return w;
+  return Math.min(bw, Math.ceil((w + (bw-w)*0.5)/2.5)*2.5);
+}
+const assistBox = (attrs, on) => `<label class="f" style="display:flex;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" ${attrs} ${on?'checked':''} style="width:auto;margin:0"> Assisted / negative: the weight is support (less = stronger)</label>`;
 
 function latestBW(beforeDate){
   const list = S.bodyweight.filter(b=>!beforeDate || b.date<=beforeDate).sort((a,b)=>a.date<b.date?-1:1);
   return list.length? list[list.length-1].kg : 0;
 }
-function setLoad(e, s){ return hasWeight(e)? num(s.w)*num(s.r) : 0; }
-function e1rm(e, s){ const r=num(s.r), w=num(s.w); if(!r||!w||!hasWeight(e)) return 0; return r===1? w : w*(1+Math.min(r,15)/30); }
-function sessionVolume(ses){ let v=0; (ses.exercises||[]).forEach(e=>e.sets.forEach(s=>{ if(s.done) v+=setLoad(e,s); })); return v; }
+function setLoad(e, s, date){ return hasWeight(e)? effW(e, s.w, date)*num(s.r) : 0; }
+function e1rm(e, s, date){ const r=num(s.r), w=effW(e, s.w, date); if(!r||!w||!hasWeight(e)) return 0; return r===1? w : w*(1+Math.min(r,15)/30); }
+function sessionVolume(ses){ let v=0; (ses.exercises||[]).forEach(e=>e.sets.forEach(s=>{ if(s.done) v+=setLoad(e,s,ses.date); })); return v; }
 function sessionSets(ses){ let n=0; (ses.exercises||[]).forEach(e=>e.sets.forEach(s=>{ if(s.done) n++; })); return n; }
 function doneSessions(){ return sortSessions(S.sessions.filter(s=>s.status==='done')); }
 // "Other activity" entries (golf, swimming …) are logged like a workout but never count for the training plan
 const isGym = s => !s.activity;
 const gymOn = d => S.sessions.filter(s=>s.date===d && isGym(s));
 // "Top" value of an exercise in a session: heaviest weight (or longest hold / duration)
-function topVal(e){ const d=e.sets.filter(s=>s.done); if(!d.length) return 0; return hasWeight(e)? Math.max(...d.map(s=>num(s.w))) : Math.max(...d.map(s=>num(s.r))); }
+// (assisted: least support)
+function topVal(e){ const d=e.sets.filter(s=>s.done); if(!d.length) return 0; return isAssist(e)? Math.min(...d.map(s=>num(s.w))) : hasWeight(e)? Math.max(...d.map(s=>num(s.w))) : Math.max(...d.map(s=>num(s.r))); }
 function setLabel(e, s){
   if(e.kind==='time') return `${s.r}s`;
   if(e.kind==='dur') return `${s.r} min`;
   if(e.kind==='reps') return `${s.r||'?'} reps`;
-  return `${fw(s.w)}×${s.r||'?'}`;
+  return `${isAssist(e)?'−':''}${fw(s.w)}×${s.r||'?'}`;
 }
 function prevOccurrence(name, ses){ // last done exercise with that name before the given session (or overall)
   const list = doneSessions(); let idx = list.length;
@@ -695,8 +706,10 @@ function prevOccurrence(name, ses){ // last done exercise with that name before 
   for(let i=idx-1;i>=0;i--){ const e=(list[i].exercises||[]).find(x=>x.name===name && x.sets.some(s=>s.done)); if(e) return e; }
   return null;
 }
-function deltaHtml(d, unit){
+// inv: lower is better (assisted exercises: less support)
+function deltaHtml(d, unit, inv){
   if(Math.abs(d)<0.001) return `<span class="same">±0</span>`;
+  if(inv) return d<0? `<span class="up">▲ ${fw(d)} ${unit}</span>` : `<span class="down">▼ +${fw(d)} ${unit}</span>`;
   return d>0? `<span class="up">▲ +${fw(d)} ${unit}</span>` : `<span class="down">▼ ${fw(d)} ${unit}</span>`;
 }
 
@@ -1053,13 +1066,13 @@ function lastWarmFor(name){ const e=prevOccurrence(name, null); return e && e.wa
 const newSet = (w, r, warm) => ({w, r:String(r??''), warm:!!warm, start:null, end:null, est:false, pressed:false, done:false});
 function buildExercise(t){
   const prev = lastSetsFor(t.name), pw = lastWarmFor(t.name);
-  const baseW = prev.length? num(prev[prev.length-1].w) : (num(t.w) || (t.kind==='bw'? latestBW() : 0));
+  const baseW = prev.length? num(prev[prev.length-1].w) : (num(t.w) || (t.kind==='bw' && !t.assist? latestBW() : 0));
   const lowR = parseInt(t.target), r0 = isFinite(lowR)? lowR : '';
   const work = Array.from({length:Math.max(1, t.sets|0)}, (_,i)=>{ const p=prev[i]||prev[prev.length-1];
     return newSet(hasWeight(t)? (p? num(p.w) : baseW) : '', p? p.r : r0, false); });
   const warm = Array.from({length:Math.max(0, t.warm|0)}, (_,i)=>{ const p=pw[i]||pw[pw.length-1];
-    return newSet(t.kind==='w'? warmWeight(work[0]? work[0].w : baseW) : hasWeight(t)? (p? num(p.w) : baseW) : '', p? p.r : r0, true); });
-  return {name:t.name, tplName:t.name, kind:t.kind, muscle:t.muscle||defaultMuscle(t.name), info:t.info||'', target:t.target,
+    return newSet(t.kind==='w'? warmFor(t, work[0]? work[0].w : baseW) : hasWeight(t)? (p? num(p.w) : baseW) : '', p? p.r : r0, true); });
+  return {name:t.name, tplName:t.name, kind:t.kind, ...(t.assist? {assist:true} : {}), muscle:t.muscle||defaultMuscle(t.name), info:t.info||'', target:t.target,
     rest: t.rest!=null && t.rest!=='' ? +t.rest : S.settings.defaultRest, sets:[...warm, ...work], arrived:null, left:null, skipped:false};
 }
 function startWorkout(key, agoMin){
@@ -1182,16 +1195,18 @@ function exAddOne(t, toTpl){
 function gearSave(toTpl){
   const a=A(), e=viewEx(), g=id=>$('#'+id).value;
   const name=g('gName').trim()||e.name, info=g('gInfo').trim(), target=g('gTarget').trim()||e.target;
+  const assist=!!($('#gAssist')||{}).checked;
   const rest=Math.max(0, parseInt(g('gRest'))||0), nw=Math.max(0, parseInt(g('gWarm'))||0), ns=Math.max(1, parseInt(g('gSets'))||1);
   const warm=e.sets.filter(x=>x.warm), work=e.sets.filter(x=>!x.warm);
-  const fit=(arr, n, isWarm)=>{ arr=arr.slice(0,n); while(arr.length<n){ const l=arr[arr.length-1] || (isWarm? {w:e.kind==='w'? warmWeight((work[0]||{}).w) : hasWeight(e)? num((work[0]||{}).w) : '', r:(work[0]||{}).r} : work[work.length-1]) || {w:'', r:parseInt(target)||''};
+  const fit=(arr, n, isWarm)=>{ arr=arr.slice(0,n); while(arr.length<n){ const l=arr[arr.length-1] || (isWarm? {w:e.kind==='w'? warmFor(e, (work[0]||{}).w) : hasWeight(e)? num((work[0]||{}).w) : '', r:(work[0]||{}).r} : work[work.length-1]) || {w:'', r:parseInt(target)||''};
     arr.push(newSet(l.w, l.r, isWarm)); } return arr; };
   const oldTpl=e.tplName, oldName=e.name, rep=e.replaces;
+  if(hasWeight(e)){ if(assist) e.assist=true; else delete e.assist; }
   Object.assign(e, {name, info, target, rest, sets:[...fit(warm,nw,true), ...fit(work,ns,false)]});
-  if(rep){ const al=(S.alts[rep]||[]).find(x=>x.name===oldName); if(al) Object.assign(al, {name, info}); } // name and info belong to the alternative
+  if(rep){ const al=(S.alts[rep]||[]).find(x=>x.name===oldName); if(al) Object.assign(al, {name, info, assist}); } // name and info belong to the alternative
   if(toTpl){
     tplChange(a.key, `Changed “${rep||name}”`, tp=>{ const te=tp.exercises.find(x=>x.name===oldTpl);
-      const fields = rep? {target, rest, warm:nw, sets:ns} : {name, info, target, rest, warm:nw, sets:ns};
+      const fields = rep? {target, rest, warm:nw, sets:ns} : {name, info, target, rest, warm:nw, sets:ns, assist};
       if(te) Object.assign(te, fields); else if(!rep) tp.exercises.push(Object.assign({kind:e.kind, muscle:e.muscle}, fields)); });
     if(!rep) e.tplName=name;
     toast(tplPendingNote());
@@ -1201,7 +1216,7 @@ function gearSave(toTpl){
 // Warm-up sets follow the weight of the first working set until they are done (weight exercises only)
 function syncWarm(e, si){
   const x=e.sets[si]; if(e.kind!=='w' || x.warm || e.sets.find(y=>!y.warm)!==x) return false;
-  let ch=false; e.sets.forEach(y=>{ if(y.warm && !y.end){ y.w=warmWeight(x.w); ch=true; } }); return ch;
+  let ch=false; e.sets.forEach(y=>{ if(y.warm && !y.end){ y.w=warmFor(e, x.w); ch=true; } }); return ch;
 }
 function wuGearSheet(){
   const a=A(), v=S.templates[a.key].v||1;
@@ -1224,10 +1239,10 @@ function stepBar(){
 }
 function scaleHtml(act, key, val, labels){ return `<div class="scale">${[1,2,3,4,5].map(n=>`<button class="chip ${val===n?'on':''}" data-act="${act}" data-k="${key}" data-v="${n}">${labels?labels[n-1]:n}</button>`).join('')}</div>`; }
 const repUnit = e => e.kind==='time'?'sec':e.kind==='dur'?'min':'reps';
-const setVal = (e, x) => `${hasWeight(e)?`${fw(x.w)} <small>kg ×</small> `:''}${esc(x.r)} <small>${repUnit(e)}</small>`;
+const setVal = (e, x) => `${hasWeight(e)?`${isAssist(e)?'−':''}${fw(x.w)} <small>kg${isAssist(e)?' support':''} ×</small> `:''}${esc(x.r)} <small>${repUnit(e)}</small>`;
 function setEditor(e, x, si){
   const st=S.settings.step||0.25;
-  return `<div class="edit">${hasWeight(e)?`<div class="stp2"><button data-act="stepW" data-s="${si}" data-v="-1" aria-label="Less weight">−</button><label><input inputmode="decimal" data-in="w" data-s="${si}" value="${esc(fw(x.w))}"><small>kg ±${fw(st)}</small></label><button data-act="stepW" data-s="${si}" data-v="1" aria-label="More weight">+</button></div>`:''}
+  return `<div class="edit">${hasWeight(e)?`<div class="stp2"><button data-act="stepW" data-s="${si}" data-v="-1" aria-label="Less weight">−</button><label><input inputmode="decimal" data-in="w" data-s="${si}" value="${esc(fw(x.w))}"><small>kg${isAssist(e)?' support':''} ±${fw(st)}</small></label><button data-act="stepW" data-s="${si}" data-v="1" aria-label="More weight">+</button></div>`:''}
     <div class="stp2"><button data-act="stepR" data-s="${si}" data-v="-1" aria-label="Less">−</button><label><input inputmode="numeric" data-in="r" data-s="${si}" value="${esc(x.r)}"><small>${repUnit(e)}</small></label><button data-act="stepR" data-s="${si}" data-v="1" aria-label="More">+</button></div></div>`;
 }
 // seconds per rep of a finished set, e.g. "4s/rep" (rep-based exercises only)
@@ -1249,7 +1264,7 @@ function restRow(e, a, b, live){
   if(b.start) return `<li class="rst"><div class="rest">Rest <b>${b.pressed?'':'~'}${fmtClock(b.start-a.end)}</b></div></li>`;
   return '';
 }
-function exSummary(e){ const w=e.sets.filter(x=>!x.warm), t=w[0]; return `${w.length} × ${esc(e.target)}${hasWeight(e)&&t?' · '+fw(t.w)+' kg':''} · rest ${e.rest} s${e.replaces?` · instead of ${esc(e.replaces)}`:''}`; }
+function exSummary(e){ const w=e.sets.filter(x=>!x.warm), t=w[0]; return `${w.length} × ${esc(e.target)}${hasWeight(e)&&t?' · '+(isAssist(e)?fw(t.w)+' kg support':fw(t.w)+' kg'):''} · rest ${e.rest} s${e.replaces?` · instead of ${esc(e.replaces)}`:''}`; }
 // Progression: last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12) → suggest more weight.
 const topReps = target => { const m=String(target||'').match(/\d+/g); return m? Math.max(...m.map(Number)) : 0; };
 function progressHint(e){
@@ -1257,8 +1272,13 @@ function progressHint(e){
   const top=topReps(e.target), prev=prevOccurrence(e.name, null); if(!top || !prev) return null;
   const ps=prev.sets.filter(s=>s.done && !s.warm), n=e.sets.filter(x=>!x.warm).length;
   if(ps.length<Math.max(1,n) || !ps.every(s=>num(s.r)>=top)) return null;
-  const pw=Math.max(...ps.map(s=>num(s.w))), step=S.settings.progStep||1;
-  const work=e.sets.filter(x=>!x.warm);
+  const inv=isAssist(e), step=S.settings.progStep||1, work=e.sets.filter(x=>!x.warm);
+  if(inv){ // assisted: less support
+    const pw=Math.min(...ps.map(s=>num(s.w))); if(pw<=0) return null;
+    if(work.some(x=>x.end) || work.some(x=>num(x.w)<pw)) return null;
+    return {top, n:ps.length, pw, step, inv, to:Math.max(0, Math.round((pw-step)*100)/100)};
+  }
+  const pw=Math.max(...ps.map(s=>num(s.w)));
   if(work.some(x=>x.end) || work.some(x=>num(x.w)>pw)) return null; // already heavier, or sets already started
   return {top, n:ps.length, pw, step, to:Math.round((pw+step)*100)/100};
 }
@@ -1275,7 +1295,7 @@ function exScreen(){
     <div class="small muted" style="margin-top:3px">${exSummary(e)}<br>Last time: ${esc(lastTxt)}</div></li>`);
   // also on the exercise you are walking to, so you can set the weight before you start
   const ph = (live && !a.moving) || (!past && a.moving && i===nIdx)? progressHint(e) : null;
-  if(ph) rows.push(`<li class="ev"><div class="prog"><span>⬆ Last time ${ph.n} × ${ph.top} (top of ${esc(e.target)}). Go heavier: <b>${fw(ph.to)} kg</b></span><button class="small primary" data-act="progApply">+${fw(ph.step)} kg</button></div></li>`);
+  if(ph) rows.push(`<li class="ev"><div class="prog"><span>⬆ Last time ${ph.n} × ${ph.top} (top of ${esc(e.target)}). ${ph.inv? `Less support: <b>${fw(ph.to)} kg</b>` : `Go heavier: <b>${fw(ph.to)} kg</b>`}</span><button class="small primary" data-act="progApply">${ph.inv?'−':'+'}${fw(ph.step)} kg</button></div></li>`);
   if(!live && !past && a.moving && i===nIdx) rows.push(`<li class="mv"><div class="move"><div class="small">On the way here</div><div class="t" data-up="${a.moving}">${fmtClock(Date.now()-a.moving)}</div></div></li>`);
   if(e.arrived){ const fs=e.sets.filter(x=>x.start).map(x=>x.start).sort((p,q)=>p-q)[0];
     rows.push(`<li class="ev">Arrived <b>${fmtTime(e.arrived)}</b> · setting up <b ${fs?'':`data-up="${e.arrived}"`}>${fmtClock((fs||Date.now())-e.arrived)}</b></li>`); }
@@ -1546,6 +1566,7 @@ function exGearSheet(){
   <label class="f">Info under the name (new lines allowed)</label><textarea class="auto" rows="1" id="gInfo" placeholder="e.g. Setting 7 · elbows down">${esc(e.info)}</textarea>
   <div class="grid2"><div><label class="f">Warm-up sets</label><input id="gWarm" inputmode="numeric" value="${ws}"></div><div><label class="f">Working sets</label><input id="gSets" inputmode="numeric" value="${ns}"></div>
   <div><label class="f">Target (reps)</label><input id="gTarget" value="${esc(e.target)}"></div><div><label class="f">Rest (s)</label><input id="gRest" inputmode="numeric" value="${e.rest}"></div></div>
+  ${hasWeight(e)? assistBox('id="gAssist"', e.assist) : ''}
   <div class="card" style="background:var(--accent-soft);border:0;margin:12px 0 0;padding:10px"><span class="small"><b>Also update template</b>: today's workout uses it right away. ${esc(keyLabel(a.key))} v${v+1} is saved once when the workout ends (all changes of this workout together); v${v} stays in Settings.</span></div>
   <div class="grid2" style="margin-top:10px"><button class="big" data-act="gearSave" data-v="once">This workout only</button><button class="primary big" data-act="gearSave" data-v="tpl">Also update template</button></div>
   ${canReplace(a.view)? '<button class="big" style="margin-top:10px" data-act="exRepOpen">⇄ Replace with an alternative…</button>' : ''}
@@ -1561,21 +1582,21 @@ function canReplace(i){ const a=A(), e=a.exercises[i]; if(!e || e.skipped) retur
   return i===a.idx? !a.moving : !e.arrived && !e.sets.some(x=>x.start||x.end); }
 function exReplace(def, toTpl){
   const a=A(), i=a.view, e=a.exercises[i], orig=altKey(e);
-  const origDef = e.replaces? e.origDef : {name:e.name, info:e.info, kind:e.kind, muscle:e.muscle};
+  const origDef = e.replaces? e.origDef : {name:e.name, info:e.info, kind:e.kind, muscle:e.muscle, assist:!!e.assist};
   // sets already done here: the done part stays as its own finished entry, the alternative takes over the sets still to do
   const split = e.sets.some(x=>x.start||x.end), ts=Date.now();
   if(split) stopRunning(e, ts);
   const todo = split? e.sets.filter(x=>!x.end) : e.sets, ws=todo.filter(x=>x.warm).length;
   const back = def.name===orig;
-  const n=buildExercise({name:def.name, info:def.info||'', kind:def.kind||e.kind, muscle:def.muscle||e.muscle, target:e.target, rest:e.rest, sets:Math.max(1, todo.length-ws), warm:ws});
+  const n=buildExercise({name:def.name, info:def.info||'', kind:def.kind||e.kind, assist:!!def.assist, muscle:def.muscle||e.muscle, target:e.target, rest:e.rest, sets:Math.max(1, todo.length-ws), warm:ws});
   Object.assign(n, {tplName:e.tplName, arrived: split? ts : e.arrived});
   const place = () => { if(split){ e.sets=e.sets.filter(x=>x.end); e.left=ts; a.exercises.splice(i+1, 0, n); a.idx=a.view=i+1; } else a.exercises[i]=n; woFocus=null; };
   if(!back){ n.replaces=orig; n.origDef=origDef;
     const L=S.alts[orig]=(S.alts[orig]||[]).filter(x=>x.name!==def.name);
-    L.unshift({name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); }
+    L.unshift({name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle, assist:!!n.assist}); }
   if(toTpl && !back){ // the alternative becomes the template exercise; the old one stays as its alternative
     tplChange(a.key, `Replaced “${orig}” with “${def.name}”`, tp=>{ const te=tp.exercises.find(x=>x.name===e.tplName);
-      if(te) Object.assign(te, {name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle}); });
+      if(te) Object.assign(te, {name:def.name, info:def.info||'', kind:n.kind, muscle:n.muscle, assist:!!n.assist}); });
     const L=(S.alts[orig]||[]).filter(x=>x.name!==def.name); L.unshift(origDef); delete S.alts[orig]; S.alts[def.name]=L;
     n.tplName=def.name; delete n.replaces; delete n.origDef;
     place(); toast(`${def.name} replaces ${orig} in the template. ${tplPendingNote()}`); return;
@@ -1595,6 +1616,7 @@ function exRepSheet(){
   <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" id="rInfo" placeholder="e.g. Seat 5 · feet high"></textarea>
   <div class="grid2"><div><label class="f">Type</label><select id="rKind">${Object.entries(KINDS).map(([k,l])=>`<option value="${k}" ${k===e.kind?'selected':''}>${l}</option>`).join('')}</select></div>
   <div><label class="f">Muscle</label><select id="rMuscle">${MUSCLES.map(m=>`<option ${m===e.muscle?'selected':''}>${m}</option>`).join('')}</select></div></div>
+  ${assistBox('id="rAssist"', false)}
   <div class="grid2" style="margin-top:12px"><button class="big" data-act="exRepNew" data-v="once">This workout only</button><button class="primary big" data-act="exRepNew" data-v="tpl">Also in template</button></div>
   <button class="big" style="margin-top:8px;background:transparent" data-act="closeModal">Cancel</button>`;
 }
@@ -1614,6 +1636,7 @@ function exAddSheet(){
   <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" id="aInfo" placeholder="e.g. Bench at 45°"></textarea>
   <div class="grid2"><div><label class="f">Type</label><select id="aKind">${Object.entries(KINDS).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select></div>
   <div><label class="f">Muscle</label><select id="aMuscle">${MUSCLES.map(m=>`<option>${m}</option>`).join('')}</select></div></div>
+  ${assistBox('id="aAssist"', false)}
   <div class="grid3"><div><label class="f">Sets</label><input id="aSets" inputmode="numeric" value="3"></div><div><label class="f">kg</label><input id="aW" inputmode="decimal" value=""></div><div><label class="f">Reps</label><input id="aR" inputmode="numeric" value="10"></div></div>
   <label class="f">Rest (s)</label><input id="aRest" inputmode="numeric" value="${S.settings.defaultRest}">
   <div class="grid2" style="margin-top:12px"><button class="big" data-act="exAdd" data-v="once">This workout only</button><button class="primary big" data-act="exAdd" data-v="tpl">Also add to template</button></div>
@@ -1649,7 +1672,7 @@ function saveWorkout(){
   const a=A(), newV=tplCommit();
   const bwv = num(a.post && a.post.bw); if(bwv) upsertBW(a.date,bwv);
   const prs=[];
-  a.exercises.forEach(e=>{ if(!hasWeight(e)) return; const best=Math.max(0,...e.sets.filter(s=>s.done&&!s.warm).map(s=>e1rm(e,s))); const prev=bestE1RM(e.name); if(best>0 && prev>0 && best>prev) prs.push(e.name); });
+  a.exercises.forEach(e=>{ if(!hasWeight(e)) return; const best=Math.max(0,...e.sets.filter(s=>s.done&&!s.warm).map(s=>e1rm(e,s,a.date))); const prev=bestE1RM(e.name); if(best>0 && prev>0 && best>prev) prs.push(e.name); });
   const ses = { id:a.id, date:a.date, type:a.type, boulder:a.boulder, status:'done', start:a.start, end:a.end, tplKey:a.key, tplV:a.tplV,
     warmup:a.warmup, exercises:a.exercises.map(e=>{ const done=e.sets.filter(s=>s.done);
       return Object.assign({}, e, {sets:done.filter(s=>!s.warm), warm:done.filter(s=>s.warm), start:e.arrived, end:e.left, skipped:e.skipped||!done.length}); }),
@@ -1660,7 +1683,7 @@ function saveWorkout(){
   toast((prs.length? `Saved. New PR: ${prs.join(', ')} 🎉` : 'Workout saved 💪') + (newV? ` · ${keyLabel(ses.tplKey)} v${newV} saved` : ''));
   if(S.settings.icloudAuto) saveToICloud();
 }
-function bestE1RM(name){ let best=0; doneSessions().forEach(ses=>(ses.exercises||[]).forEach(e=>{ if(e.name===name) e.sets.forEach(s=>{ if(s.done) best=Math.max(best,e1rm(e,s)); }); })); return best; }
+function bestE1RM(name){ let best=0; doneSessions().forEach(ses=>(ses.exercises||[]).forEach(e=>{ if(e.name===name) e.sets.forEach(s=>{ if(s.done) best=Math.max(best,e1rm(e,s,ses.date)); }); })); return best; }
 function upsertBW(date,kg){ const i=S.bodyweight.findIndex(b=>b.date===date); if(i>=0) S.bodyweight[i].kg=kg; else S.bodyweight.push({date,kg}); }
 
 /* ---- skip ---- */
@@ -1763,7 +1786,7 @@ function recordTimeline(s){
     const prev = prevOccurrence(e.name, s), d = prev && e.sets.length? topVal(e)-topVal(prev) : null;
     rows.push(`<li class="exh ${e.skipped&&!all.length?'skp':'past'}"><div class="eyebrow">Exercise ${i+1} · ${esc(e.muscle||'')}${e.skipped&&!all.length?' · skipped':e.start&&e.end?' · '+fmtClock(e.end-e.start):''}</div>
       <div class="exname sm">${esc(e.name)}</div>${e.info?`<div class="exinfo">${esc(e.info)}</div>`:''}
-      ${all.length? `<div class="small">${d==null?'<span class="muted">first time</span>':deltaHtml(d,unitOf(e))+' <span class="muted">vs. last time</span>'}</div>`:''}</li>`);
+      ${all.length? `<div class="small">${d==null?'<span class="muted">first time</span>':deltaHtml(d,unitOf(e),isAssist(e))+' <span class="muted">vs. last time</span>'}</div>`:''}</li>`);
     if(e.arrived && timed[0]) rows.push(`<li class="ev">Arrived <b>${fmtTime(e.arrived)}</b> · setting up <b>${fmtClock(timed[0].start-e.arrived)}</b></li>`);
     let wi=0, si=0, head=false;
     timed.forEach((x,j)=>{
@@ -1799,7 +1822,7 @@ function sessionDetail(s){
       <div class="row between"><b>${esc(e.name)}</b><span class="small muted">${e.start&&e.end?fmtDur(e.end-e.start):''}</span></div>
       ${e.skipped||!e.sets.length? '<div class="small" style="color:var(--bad)">skipped</div>' :
       `<div class="small ink2">${e.sets.map(x=>esc(setLabel(e,x))).join(' · ')}</div>
-       <div class="small">${d==null?'<span class="muted">first time</span>':deltaHtml(d,unitOf(e))+' <span class="muted">vs. last time</span>'}</div>`}</div>`;
+       <div class="small">${d==null?'<span class="muted">first time</span>':deltaHtml(d,unitOf(e),isAssist(e))+' <span class="muted">vs. last time</span>'}</div>`}</div>`;
   }).join('') || '<p class="muted small">No exercise details.</p>';
   return `<div class="card">
     <h2><span class="t-${s.type}">${esc(s.type)}${s.boulder?' + Bouldering':''}</span></h2>
@@ -1892,7 +1915,7 @@ function muscleProgress(from){
     const before = list.filter(o=>o.date<from);
     const base = inR.length>1? inR[0] : before[before.length-1]; if(!base) return;
     const last = inR[inR.length-1];
-    rows.push({name, muscle:last.e.muscle||defaultMuscle(name), from:base.v, to:last.v, d:last.v-base.v, unit:unitOf(last.e)});
+    rows.push({name, muscle:last.e.muscle||defaultMuscle(name), from:base.v, to:last.v, d:last.v-base.v, unit:unitOf(last.e), inv:isAssist(last.e)});
   });
   return rows;
 }
@@ -1907,9 +1930,9 @@ function viewStats(){
 
   const mp = muscleProgress(from);
   const groups = MUSCLES.map(m=>({m, rows:mp.filter(r=>r.muscle===m)})).filter(g=>g.rows.length);
-  const mpHtml = groups.map(g=>{ const up=g.rows.filter(r=>r.d>0).length;
+  const mpHtml = groups.map(g=>{ const up=g.rows.filter(r=>r.inv? r.d<0 : r.d>0).length;
     return `<div style="margin-top:10px"><div class="row between"><b>${esc(g.m)}</b><span class="small muted">${up}/${g.rows.length} improved</span></div>
-    <table class="tbl">${g.rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="small muted" style="white-space:nowrap">${fw(r.from)} → ${fw(r.to)} ${r.unit}</td><td style="text-align:right;white-space:nowrap">${deltaHtml(r.d,r.unit)}</td></tr>`).join('')}</table></div>`; }).join('');
+    <table class="tbl">${g.rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="small muted" style="white-space:nowrap">${fw(r.from)} → ${fw(r.to)} ${r.unit}</td><td style="text-align:right;white-space:nowrap">${deltaHtml(r.d,r.unit,r.inv)}</td></tr>`).join('')}</table></div>`; }).join('');
 
   const byType = {}; TYPES.forEach(t=>{ const d=done.filter(s=>s.type===t && (s.exercises||[]).length); byType[t]={vol:avg(d.map(sessionVolume))||0, sets:avg(d.map(sessionSets))||0}; });
   let lostVol=0, lostSets=0, gainedMin=0; const worth=[];
@@ -2032,11 +2055,11 @@ function mountCharts(){
   if(statsEx){
     const pts=[]; let kind='w';
     ses.filter(s=>s.status==='done').forEach(s=>{ const e=(s.exercises||[]).find(x=>x.name===statsEx); if(!e||!e.sets.some(x=>x.done)) return; kind=e.kind;
-      const v = hasWeight(e)? Math.max(...e.sets.filter(x=>x.done).map(x=>e1rm(e,x))) : topVal(e);
-      if(v>0) pts.push({lx:dl(s), y:v, tip:`${fmtDate(s.date)}: ${fmtNum(v)} ${unitOf(e)} · ${e.sets.filter(x=>x.done).map(x=>setLabel(e,x)).join(', ')}`}); });
+      const v = hasWeight(e)? Math.max(...e.sets.filter(x=>x.done).map(x=>e1rm(e,x,s.date))) : topVal(e); if(isAssist(e)) kind='assist';
+      if(v>0) pts.push({lx:dl(s), y:v, tip:`${fmtDate(s.date)}: ${fmtNum(v)} ${isAssist(e)?'kg':unitOf(e)} · ${e.sets.filter(x=>x.done).map(x=>setLabel(e,x)).join(', ')}`}); });
     lineChart($('#chEx'), pts);
     const note=$('#exNote');
-    if(note){ const metric = kind==='time'?'Longest hold (sec)':kind==='dur'?'Duration (min)':'Estimated 1RM (kg, Epley formula)';
+    if(note){ const metric = kind==='time'?'Longest hold (sec)':kind==='dur'?'Duration (min)':kind==='assist'?'Estimated 1RM (kg, bodyweight − support; needs your bodyweight)':'Estimated 1RM (kg, Epley formula)';
       const ch = pts.length>1? ((pts[pts.length-1].y/pts[0].y-1)*100):null;
       note.textContent = metric + (ch!=null? ` · ${ch>=0?'+':''}${ch.toFixed(1)}% since first entry in range`:''); }
   }
@@ -2060,11 +2083,12 @@ function tplEditorHtml(){
     <label class="f">Info (new lines allowed)</label><textarea class="auto" rows="1" data-te="${i}" data-k="info" placeholder="e.g. Setting 7 · elbows down">${esc(e.info||'')}</textarea>
     <div class="grid2"><div><label class="f">Type</label><select data-te="${i}" data-k="kind">${opt(Object.entries(KINDS),e.kind)}</select></div>
       <div><label class="f">Muscle</label><select data-te="${i}" data-k="muscle">${opt(MUSCLES.map(m=>[m,m]),e.muscle)}</select></div></div>
+    ${hasWeight(e)? assistBox(`data-te="${i}" data-k="assist"`, e.assist) : ''}
     <div class="grid3"><div><label class="f">Warm-up sets</label><input inputmode="numeric" data-te="${i}" data-k="warm" value="${e.warm||0}"></div>
       <div><label class="f">Sets</label><input inputmode="numeric" data-te="${i}" data-k="sets" value="${e.sets}"></div>
       <div><label class="f">Target</label><input data-te="${i}" data-k="target" value="${esc(e.target)}"></div>
       <div><label class="f">Rest (s)</label><input inputmode="numeric" data-te="${i}" data-k="rest" value="${e.rest}"></div>
-      <div><label class="f">Start kg</label><input inputmode="decimal" data-te="${i}" data-k="w" value="${e.w?fw(e.w):''}" placeholder="last time"></div></div>
+      <div><label class="f">${isAssist(e)?'Start kg support':'Start kg'}</label><input inputmode="decimal" data-te="${i}" data-k="w" value="${e.w?fw(e.w):''}" placeholder="last time"></div></div>
   </div>`).join('');
   return `<div class="row between"><h3 style="margin:0">Editing ${esc(keyLabel(tplEd.key))} (v${v} → v${v+1})</h3></div>
     <label class="f">Warm-up (new lines allowed)</label><textarea class="auto" rows="1" data-te="wu" data-k="text">${esc(t.warmup.text||'')}</textarea>
@@ -2081,6 +2105,7 @@ function tplEdInput(t){
   if(['warm','rest'].includes(k)) e[k]=Math.max(0,parseInt(t.value)||0);
   else if(k==='sets') e[k]=Math.max(1,parseInt(t.value)||1);
   else if(k==='w') e[k]=num(t.value);
+  else if(k==='assist'){ if(t.checked) e.assist=true; else delete e.assist; }
   else e[k]=t.value;
 }
 function tplEdSave(){
@@ -2104,7 +2129,7 @@ function viewSettings(){
   const rows=tpl.exercises.map((e,i)=>`<div class="list-item" style="display:block;padding:8px 0">
     <div class="row between"><b>${i+1}. ${esc(e.name)}</b><span class="small muted">${esc(e.muscle||'')}</span></div>
     ${e.info?`<div class="small ink2 pre">ⓘ ${esc(e.info)}</div>`:''}
-    <div class="small muted">${e.warm?e.warm+' warm-up + ':''}${e.sets} × ${esc(e.target)} · ${esc(KINDS[e.kind]||e.kind)} · rest ${e.rest} s${e.w?' · start '+fw(e.w)+' kg':''}</div></div>`).join('');
+    <div class="small muted">${e.warm?e.warm+' warm-up + ':''}${e.sets} × ${esc(e.target)} · ${esc(KINDS[e.kind]||e.kind)}${isAssist(e)?' · assisted':''} · rest ${e.rest} s${e.w?' · start '+fw(e.w)+(isAssist(e)?' kg support':' kg'):''}</div></div>`).join('');
   return `<h1>Settings</h1>
   <div class="card"><h2>Profile</h2>
     <label class="f">Name (stored on this device only)</label><input data-prof="name" value="${esc(S.profile.name)}">
@@ -2252,6 +2277,7 @@ const MANUAL = [
     {id:'wizard', title:'One exercise per screen', where:'Workout tab', text:'First a short check-in (energy, motivation, soreness of the muscles this workout uses, sleep), then "Start workout" starts the clock and the warm-up, then always exactly one exercise on the screen. To look at the previous or next exercise, scroll past the top or bottom edge twice: the first pull arms the arrow ("Pull again for …"), the second one switches. "Previous" only appears while you pull down at the top. ‹ top left goes back in one tap. "Back to current" returns to where you are. The screen stays on during a workout (Settings → General).'},
     {id:'sets', title:'Start and ✓ on each set', where:'Workout → exercise', text:'Tap ▶ Start when you begin a set and ✓ when it is done. ✓ without Start counts the set from the end of the rest countdown (shown with ~). Tap a set to change kg and reps; +/− also changes the following sets with the same value. Tap a green ✓ to undo it. A done set shows its time and seconds per rep (e.g. 4s/rep). "+ Add a set" works also after the exercise is finished: it brings you back to it.'},
     {id:'prog', title:'Go heavier (progression hint)', where:'Workout → under the exercise name', text:'If last time every working set reached the top of the rep range (e.g. 3 × 12 at 8-12), a green hint suggests more weight. Tap it to put +1 kg (changeable in Settings → General) on all working sets.'},
+    {id:'assist', title:'Assisted (negative) exercises', where:'⚙ on the exercise · Settings → ✎ Edit · Add / Replace', text:'Tick “Assisted / negative” for machines where the weight helps you (assisted pull-ups, dips). The kg you enter is support and shows as −40 kg support. Less support = stronger: the progression hint suggests less support, and “vs. last time” shows ▲ when you used less. Volume and 1RM use your bodyweight minus the support, so log your bodyweight. The warm-up set gets more support (halfway to your bodyweight).'},
     {id:'warmset', title:'Warm-up sets', where:'Workout → above "Working sets"', text:'Every weight exercise starts with one warm-up set at 30–50 % of the working weight, rounded so you only stack big plates on top (100 kg → 50 kg, 22.5 kg → 10 kg). It follows the first working set when you change that weight. Change the number of warm-up sets with ⚙.'},
     {id:'warmup', title:'Warm-up & no tabs during a workout', where:'Workout → first screen', text:'The warm-up looks like an exercise: what to do is in the line under the title, ⚙ changes it for today or for the template. While a workout runs, the bottom tabs are hidden; they come back after saving or discarding the workout.'},
     {id:'rest', title:'Rest', where:'Workout → between the sets', text:'Starts by itself with ✓ and ends when you tap Start on the next set. There is no stop: once the rest time is over it turns orange, beeps and counts on. The rest time of an exercise is changed with ⚙. After a warm-up set the rest is always the same for every exercise (default 60 s, Settings → Workout in progress).'},
@@ -2403,7 +2429,7 @@ document.addEventListener('click', ev=>{
     case 'setFocus': { if(ev.target.closest('input,.edit')) break; const si=+t.dataset.s; woFocus = woFocus===si? -1 : si; render(); break; }
     case 'setStart': startSet(+t.dataset.s); save(); render(); break;
     case 'progApply': { const e=viewEx(), ph=progressHint(e); if(!ph) break; e.sets.forEach(x=>{ if(!x.warm && !x.end) x.w=ph.to; });
-      const fi=e.sets.findIndex(x=>!x.warm); if(fi>=0) syncWarm(e, fi); save(); render(); toast(`Working sets now ${fw(ph.to)} kg`); break; }
+      const fi=e.sets.findIndex(x=>!x.warm); if(fi>=0) syncWarm(e, fi); save(); render(); toast(`Working sets now ${fw(ph.to)} kg${ph.inv?' support':''}`); break; }
     case 'setAdd': { const e=viewEx(), w=e.sets.filter(x=>!x.warm), l=w[w.length-1]||e.sets[e.sets.length-1]||{w:'',r:''};
       e.sets.push(newSet(l.w, l.r, false));
       // adding a set to the exercise you just finished brings you back to it
@@ -2432,13 +2458,13 @@ document.addEventListener('click', ev=>{
     case 'exRepDel': { const k=altKey(viewEx()), L=S.alts[k]||[], x=L[+t.dataset.i]; if(x && confirm(`Forget “${x.name}” as an alternative? Its history stays.`)){ L.splice(+t.dataset.i,1); save(); openModal(exRepSheet()); } break; }
     case 'exRepNew': { const name=$('#rName').value.trim(); if(!name){ toast('Enter a name'); break; }
       if(name===viewEx().name){ toast('That is the exercise you have now'); break; }
-      exReplace({name, info:$('#rInfo').value.trim(), kind:$('#rKind').value, muscle:$('#rMuscle').value}, v==='tpl'); save(); closeModal(); render(); break; }
+      exReplace({name, info:$('#rInfo').value.trim(), kind:$('#rKind').value, muscle:$('#rMuscle').value, assist:$('#rAssist').checked}, v==='tpl'); save(); closeModal(); render(); break; }
     case 'exUp': case 'exDown': { const i=+t.dataset.i, j=a==='exUp'? i-1 : i+1, L=W.exercises;
       if(j>W.idx && j<L.length && !L[j].arrived){ [L[i],L[j]]=[L[j],L[i]]; save(); openModal(exMoveSheet()); render(); } break; }
     case 'exDoNext': exDoNext(+t.dataset.i); save(); closeModal(); woScroll='top'; render(); break;
     case 'exAddOpen': openModal(exAddSheet()); break;
     case 'exAdd': { const g=id=>$('#'+id).value.trim(); const name=g('aName'); if(!name){ toast('Enter a name'); break; }
-      const tpl={name, info:g('aInfo'), kind:g('aKind'), muscle:g('aMuscle'), sets:Math.max(1,parseInt(g('aSets'))||3), target:g('aR')||'10', rest:Math.max(0,parseInt(g('aRest'))||0), warm:g('aKind')==='w'? 1 : 0, w:num(g('aW'))};
+      const tpl={name, info:g('aInfo'), kind:g('aKind'), muscle:g('aMuscle'), sets:Math.max(1,parseInt(g('aSets'))||3), target:g('aR')||'10', rest:Math.max(0,parseInt(g('aRest'))||0), warm:g('aKind')==='w'? 1 : 0, w:num(g('aW')), ...($('#aAssist').checked? {assist:true} : {})};
       exAddOne(tpl, v==='tpl'); save(); closeModal(); render(); toast(v==='tpl'? 'Added. '+tplPendingNote() : 'Added after the current exercise'); break; }
     case 'exSkipOpen': openModal(exSkipSheet()); break;
     case 'exSkip': leaveExercise(Date.now(), true); save(); closeModal(); render(); break;
