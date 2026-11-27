@@ -3,9 +3,11 @@
 A web app you install on the iPhone home screen. It tracks push/pull/legs workouts, weights, skips, stretching and progress.
 All data stays on the device (localStorage), and backups go to the user's own iCloud Drive. Nothing is sent to a server.
 
-## Hosting (GitHub Pages)
-Repo → **Settings → Pages** → *Deploy from a branch* → `main` / `(root)`.
-The app then runs at `https://pstoblg.github.io/gym/`.
+## How it's served
+GitHub Pages (repo → Settings → Pages → branch `live`, `/ (root)`) only serves the small loader `index.html`: https://pstoblg.github.io/gym/
+On every start, the loader fetches the newest `app.js` / `app.css` from the `live` branch directly from GitHub and keeps a copy on the phone.
+So a push to `live` reaches the phone on the next app start, with no Pages build wait. Offline, the last downloaded version runs.
+Settings → App version has *Check for updates* and *Go back to the previous version*.
 
 ## Install on iPhone
 Open the URL in **Safari** → Share → **Add to Home Screen**. On first launch, a welcome wizard asks for your name (stored only on the device),
@@ -22,4 +24,4 @@ The app passes the workout's start and end time to the Shortcut. The Shortcut re
 and copies the result. Back in the app, tap *Paste Apple Health result*. Setup steps are in Settings.
 
 ## Updating
-Change the files, bump `VERSION` in `sw.js`, merge to `main`, and open the app twice on the phone.
+Push to `live`, then restart the app on the phone. Only bump `VERSION` in `sw.js` when the loader shell (index.html, manifest, icons) changes.
